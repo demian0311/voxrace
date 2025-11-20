@@ -2,6 +2,7 @@ body {
     margin: 0;
     overflow: hidden;
     background-color: #2E3440; /* Nord0 */
+    user-select: none;
 }
 canvas {
     display: block;

@@ -3,8 +3,8 @@ import * as THREE from 'three';
 // --- Configuration ---
 const VOXEL_SIZE = 5;
 const CHUNK_SIZE = 10;
-const DRAW_DISTANCE = 4;
-const TANK_SPEED = 10;
+const DRAW_DISTANCE = 8;
+const TANK_SPEED = 20;
 const ENEMY_SPEED = 4;
 const TANK_ROTATION_SPEED = 2;
 const PROJECTILE_SPEED = 30;
@@ -98,12 +98,25 @@ const COLORS = [
 const BLUE_COLOR = new THREE.Color(0x5E81AC); // Nord10
 const CLOUD_COLOR = new THREE.Color(0xD8DEE9); // Nord4
 
+// --- Utilities ---
+function mulberry32(a) {
+    return function() {
+      var t = a += 0x6D2B79F5;
+      t = Math.imul(t ^ t >>> 15, t | 1);
+      t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    }
+}
+
 // --- Enemy Tanks ---
 const enemies = [];
 
 function createEnemyTank(pos) {
     const tankGroup = new THREE.Group();
     tankGroup.position.copy(pos);
+
+    const innerGroup = new THREE.Group();
+    tankGroup.add(innerGroup);
 
     // Body
     const bodyGeo = new THREE.BoxGeometry(4, 2, 6);
@@ -112,7 +125,7 @@ function createEnemyTank(pos) {
     body.position.y = 1.5;
     body.castShadow = true;
     body.receiveShadow = true;
-    tankGroup.add(body);
+    innerGroup.add(body);
 
     // Turret
     const turretGeo = new THREE.BoxGeometry(3, 1.5, 3);
@@ -121,7 +134,7 @@ function createEnemyTank(pos) {
     turret.position.y = 3.25;
     turret.castShadow = true;
     turret.receiveShadow = true;
-    tankGroup.add(turret);
+    innerGroup.add(turret);
 
     // Barrel
     const barrelGeo = new THREE.CylinderGeometry(0.3, 0.3, 5, 8);
@@ -140,16 +153,76 @@ function createEnemyTank(pos) {
     const leftTrack = new THREE.Mesh(trackGeo, leftTrackMat);
     leftTrack.position.set(-2.2, 0.75, 0);
     leftTrack.castShadow = true;
-    tankGroup.add(leftTrack);
+    innerGroup.add(leftTrack);
 
     const rightTrackMat = new THREE.MeshStandardMaterial({ map: rightTrackTexture });
     const rightTrack = new THREE.Mesh(trackGeo, rightTrackMat);
     rightTrack.position.set(2.2, 0.75, 0);
     rightTrack.castShadow = true;
-    tankGroup.add(rightTrack);
+    innerGroup.add(rightTrack);
 
     scene.add(tankGroup);
-    enemies.push({ mesh: tankGroup, leftTrackTexture, rightTrackTexture });
+    enemies.push({ mesh: tankGroup, innerMesh: innerGroup, leftTrackTexture, rightTrackTexture, lastTrackPos: pos.clone() });
+}
+
+// --- Track Marks ---
+const trackMarks = [];
+const trackMarkGeo = new THREE.PlaneGeometry(1, 1);
+trackMarkGeo.rotateX(-Math.PI / 2);
+
+function spawnTrackMarks(unit) {
+    if (!unit.lastTrackPos) unit.lastTrackPos = unit.mesh.position.clone();
+
+    if (unit.mesh.position.distanceTo(unit.lastTrackPos) > 1.5) {
+        const quat = unit.mesh.quaternion;
+        
+        // Left Track
+        const leftPos = new THREE.Vector3(-2.2, 0, 0).applyQuaternion(quat).add(unit.mesh.position);
+        const leftH = getTerrainHeight(leftPos.x, leftPos.z);
+        if (leftH > -50) {
+            leftPos.y = leftH + 0.05;
+            createTrackMark(leftPos, quat);
+        }
+
+        // Right Track
+        const rightPos = new THREE.Vector3(2.2, 0, 0).applyQuaternion(quat).add(unit.mesh.position);
+        const rightH = getTerrainHeight(rightPos.x, rightPos.z);
+        if (rightH > -50) {
+            rightPos.y = rightH + 0.05;
+            createTrackMark(rightPos, quat);
+        }
+
+        unit.lastTrackPos.copy(unit.mesh.position);
+    }
+}
+
+function createTrackMark(pos, quat) {
+    const mat = new THREE.MeshBasicMaterial({ 
+        color: 0x2E3440, // Nord0
+        transparent: true, 
+        opacity: 0.3,
+    });
+    const mesh = new THREE.Mesh(trackMarkGeo, mat);
+    mesh.position.copy(pos);
+    mesh.quaternion.copy(quat);
+    
+    scene.add(mesh);
+    trackMarks.push({ mesh, life: 10.0 }); // 10 seconds life
+}
+
+function updateTrackMarks(delta) {
+    for (let i = trackMarks.length - 1; i >= 0; i--) {
+        const mark = trackMarks[i];
+        mark.life -= delta;
+        
+        if (mark.life <= 0) {
+            scene.remove(mark.mesh);
+            mark.mesh.material.dispose();
+            trackMarks.splice(i, 1);
+        } else {
+            mark.mesh.material.opacity = (mark.life / 10.0) * 0.3;
+        }
+    }
 }
 
 function generateChunk(cx, cz) {
@@ -159,6 +232,10 @@ function generateChunk(cx, cz) {
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     
+    // Seeded RNG for consistent terrain
+    const seed = (cx * 2654435761) ^ (cz * 2246822507);
+    const rng = mulberry32(seed);
+
     let index = 0;
     const chunkKeys = [];
     const startX = cx * CHUNK_SIZE;
@@ -175,7 +252,7 @@ function generateChunk(cx, cz) {
             mesh.setMatrixAt(index, dummy.matrix);
             
             // Randomize base color (mostly green, some teal/dirt)
-            const rand = Math.random();
+            const rand = rng();
             if (rand > 0.95) mesh.setColorAt(index, COLORS[2]); // Dirt
             else if (rand > 0.8) mesh.setColorAt(index, COLORS[1]); // Teal
             else mesh.setColorAt(index, COLORS[0]); // Green
@@ -190,7 +267,7 @@ function generateChunk(cx, cz) {
             // Random hills
             // Keep center 3x3 flat for spawn
             if ((Math.abs(gx) > 1 || Math.abs(gz) > 1)) {
-                const randHeight = Math.random();
+                const randHeight = rng();
                 
                 // Level 1 (Chance: ~6%)
                 if (randHeight > 0.94) {
@@ -204,7 +281,7 @@ function generateChunk(cx, cz) {
                         mesh.setColorAt(index, BLUE_COLOR);
                     } else {
                         // Hills are snowy or teal
-                        if (Math.random() > 0.5) mesh.setColorAt(index, COLORS[3]); // Snow
+                        if (rng() > 0.5) mesh.setColorAt(index, COLORS[3]); // Snow
                         else mesh.setColorAt(index, COLORS[1]); // Teal
                     }
                     
@@ -229,7 +306,7 @@ function generateChunk(cx, cz) {
                         height = VOXEL_SIZE * 2;
 
                         // Level 3 (Chance: 10% of Level 2)
-                        if (Math.random() > 0.9) {
+                        if (rng() > 0.9) {
                             dummy.position.set(gx * VOXEL_SIZE, VOXEL_SIZE * 2.5, gz * VOXEL_SIZE);
                             dummy.updateMatrix();
                             mesh.setMatrixAt(index, dummy.matrix);
@@ -273,9 +350,9 @@ function generateChunk(cx, cz) {
     worldGroup.add(mesh);
     
     // Spawn Enemy (20% chance per chunk, but not at 0,0)
-    if ((cx !== 0 || cz !== 0) && Math.random() > 0.8) {
-        const rx = Math.floor(Math.random() * CHUNK_SIZE);
-        const rz = Math.floor(Math.random() * CHUNK_SIZE);
+    if ((cx !== 0 || cz !== 0) && rng() > 0.8) {
+        const rx = Math.floor(rng() * CHUNK_SIZE);
+        const rz = Math.floor(rng() * CHUNK_SIZE);
         const gx = startX + rx;
         const gz = startZ + rz;
         
@@ -473,6 +550,8 @@ function createTrackTexture() {
 // --- Tank Construction ---
 function createTank() {
     const tankGroup = new THREE.Group();
+    const innerGroup = new THREE.Group();
+    tankGroup.add(innerGroup);
 
     // Body
     const bodyGeo = new THREE.BoxGeometry(4, 2, 6);
@@ -481,16 +560,43 @@ function createTank() {
     body.position.y = 1.5; // Lift up so wheels can be below (conceptually)
     body.castShadow = true;
     body.receiveShadow = true;
-    tankGroup.add(body);
+    innerGroup.add(body);
 
-    // Turret
+    // Turret Group
+    const turret = new THREE.Group();
+    turret.position.y = 3.25;
+    innerGroup.add(turret);
+
+    // Main Turret Block
     const turretGeo = new THREE.BoxGeometry(3, 1.5, 3);
     const turretMat = new THREE.MeshStandardMaterial({ color: 0x88C0D0 }); // Nord8
-    const turret = new THREE.Mesh(turretGeo, turretMat);
-    turret.position.y = 3.25;
-    turret.castShadow = true;
-    turret.receiveShadow = true;
-    tankGroup.add(turret);
+    const turretMesh = new THREE.Mesh(turretGeo, turretMat);
+    turretMesh.castShadow = true;
+    turretMesh.receiveShadow = true;
+    turret.add(turretMesh);
+
+    // Detail: Commander's Cupola (Nord13 - Yellow)
+    const cupolaGeo = new THREE.CylinderGeometry(0.6, 0.6, 0.6, 8);
+    const cupolaMat = new THREE.MeshStandardMaterial({ color: 0xEBCB8B }); // Nord13
+    const cupola = new THREE.Mesh(cupolaGeo, cupolaMat);
+    cupola.position.set(0.8, 1.0, 0.5);
+    cupola.castShadow = true;
+    turret.add(cupola);
+
+    // Detail: Rear Bustle (Nord3 - Dark Grey)
+    const bustleGeo = new THREE.BoxGeometry(2.5, 1.2, 1.5);
+    const bustleMat = new THREE.MeshStandardMaterial({ color: 0x4C566A }); // Nord3
+    const bustle = new THREE.Mesh(bustleGeo, bustleMat);
+    bustle.position.set(0, 0.2, 2.0);
+    bustle.castShadow = true;
+    turret.add(bustle);
+
+    // Detail: Antenna (Nord4 - White)
+    const antennaGeo = new THREE.CylinderGeometry(0.05, 0.05, 4);
+    const antennaMat = new THREE.MeshStandardMaterial({ color: 0xD8DEE9 }); // Nord4
+    const antenna = new THREE.Mesh(antennaGeo, antennaMat);
+    antenna.position.set(-1, 2.0, 1);
+    turret.add(antenna);
 
     // Barrel
     const barrelGeo = new THREE.CylinderGeometry(0.3, 0.3, 5, 8);
@@ -498,7 +604,14 @@ function createTank() {
     const barrel = new THREE.Mesh(barrelGeo, barrelMat);
     barrel.rotation.x = Math.PI / 2;
     barrel.position.set(0, 0, -2.5); // Stick out front
-    turret.add(barrel); // Attach to turret
+    turret.add(barrel);
+
+    // Detail: Muzzle Brake (Nord3 - Dark Grey)
+    const brakeGeo = new THREE.BoxGeometry(0.8, 0.8, 1);
+    const brakeMat = new THREE.MeshStandardMaterial({ color: 0x4C566A }); // Nord3
+    const brake = new THREE.Mesh(brakeGeo, brakeMat);
+    brake.position.set(0, 2.5, 0); // At the tip of the barrel
+    barrel.add(brake);
 
     // Tracks (Visual only)
     const leftTrackTexture = createTrackTexture();
@@ -510,20 +623,22 @@ function createTank() {
     const leftTrack = new THREE.Mesh(trackGeo, leftTrackMat);
     leftTrack.position.set(-2.2, 0.75, 0);
     leftTrack.castShadow = true;
-    tankGroup.add(leftTrack);
+    innerGroup.add(leftTrack);
 
     const rightTrackMat = new THREE.MeshStandardMaterial({ map: rightTrackTexture });
     const rightTrack = new THREE.Mesh(trackGeo, rightTrackMat);
     rightTrack.position.set(2.2, 0.75, 0);
     rightTrack.castShadow = true;
-    tankGroup.add(rightTrack);
+    innerGroup.add(rightTrack);
 
-    return { mesh: tankGroup, turret: turret, barrel: barrel, leftTrackTexture: leftTrackTexture, rightTrackTexture: rightTrackTexture };
+    return { mesh: tankGroup, innerMesh: innerGroup, turret: turret, barrel: barrel, leftTrackTexture: leftTrackTexture, rightTrackTexture: rightTrackTexture, currentSpeed: 0 };
 }
 
 const tank = createTank();
 scene.add(tank.mesh);
 tank.mesh.position.set(0, 0, 0); // Start at center, which is now guaranteed flat
+
+let recoilVelocity = new THREE.Vector3();
 
 // --- Projectiles ---
 const projectiles = [];
@@ -540,6 +655,9 @@ function shoot() {
     
     // Change barrel color to Red (Cooldown)
     tank.barrel.material.color.setHex(0xBF616A); // Nord11
+
+    // Barrel Recoil Animation
+    tank.barrel.position.z = -1.5;
 
     const projectile = new THREE.Mesh(projectileGeo, projectileMat);
     
@@ -559,6 +677,13 @@ function shoot() {
     
     scene.add(projectile);
     projectiles.push(projectile);
+
+    // Recoil
+    const recoilForce = direction.clone().normalize().negate().multiplyScalar(2);
+    recoilVelocity.add(recoilForce);
+    
+    // Pitch Kick (Nose Up)
+    tank.innerMesh.rotation.x += 0.1;
 }
 
 // --- Explosions ---
@@ -661,6 +786,27 @@ const keys = {
     space: false
 };
 
+let mouseX = 0;
+let mouseY = 0;
+window.addEventListener('mousemove', (e) => {
+    mouseX = (e.clientX / window.innerWidth) * 2 - 1;
+    mouseY = (e.clientY / window.innerHeight) * 2 - 1;
+});
+document.body.addEventListener('mouseleave', () => {
+    mouseX = 0;
+    mouseY = 0;
+});
+
+let mouseDownTime = 0;
+window.addEventListener('mousedown', () => {
+    mouseDownTime = Date.now();
+});
+window.addEventListener('mouseup', () => {
+    if (Date.now() - mouseDownTime < 200) {
+        shoot();
+    }
+});
+
 window.addEventListener('keydown', (e) => {
     if (e.code === 'Space' && !keys.space) {
         shoot();
@@ -694,8 +840,27 @@ function animate() {
         tank.barrel.material.color.setHex(0x88C0D0); // Nord8 (Original Blue/Ready)
     }
 
+    // Barrel Recoil Recovery
+    tank.barrel.position.z = THREE.MathUtils.lerp(tank.barrel.position.z, -2.5, 5 * delta);
+
     updateChunks();
     updateParticles(delta);
+    updateTrackMarks(delta);
+    spawnTrackMarks(tank);
+
+    // Recoil Physics
+    if (recoilVelocity.lengthSq() > 0.1) {
+        const move = recoilVelocity.clone().multiplyScalar(delta);
+        const targetPos = tank.mesh.position.clone().add(move);
+        
+        // Try to push blocks (recoil can push too!)
+        attemptPush(targetPos, move);
+
+        if (!checkCollision(targetPos, tank.mesh.quaternion, tank.mesh)) {
+            tank.mesh.position.copy(targetPos);
+        }
+        recoilVelocity.multiplyScalar(Math.max(0, 1 - 5 * delta)); // Damping
+    }
 
     // Enemy Logic
     enemies.forEach(enemy => {
@@ -757,25 +922,48 @@ function animate() {
         } else {
             enemy.mesh.position.y -= 9.8 * delta;
         }
+        
+        spawnTrackMarks(enemy);
     });
 
     // Tank Movement
     const moveSpeed = TANK_SPEED * delta;
     const rotSpeed = TANK_ROTATION_SPEED * delta;
     
-    let rotation = 0;
-    if (keys.a || keys.arrowleft) {
-        rotation = rotSpeed;
-        tank.mesh.rotateY(rotSpeed);
-    }
-    if (keys.d || keys.arrowright) {
-        rotation = -rotSpeed;
-        tank.mesh.rotateY(-rotSpeed);
+    let turnInput = 0;
+    if (Math.abs(mouseX) > 0.1) turnInput -= mouseX;
+    if (keys.a || keys.arrowleft) turnInput += 1;
+    if (keys.d || keys.arrowright) turnInput -= 1;
+    
+    // Clamp
+    turnInput = Math.max(-1, Math.min(1, turnInput));
+
+    const rotation = turnInput * rotSpeed;
+    if (rotation !== 0) {
+        tank.mesh.rotateY(rotation);
     }
 
-    let forward = 0;
-    if (keys.w || keys.arrowup) forward = -moveSpeed;
-    if (keys.s || keys.arrowdown) forward = moveSpeed;
+    let forwardInput = 0;
+    if (Math.abs(mouseY) > 0.1) forwardInput += mouseY;
+    if (keys.w || keys.arrowup) forwardInput -= 1;
+    if (keys.s || keys.arrowdown) forwardInput += 1;
+    
+    forwardInput = Math.max(-1, Math.min(1, forwardInput));
+    
+    // Momentum & Pitch
+    const targetSpeed = forwardInput * TANK_SPEED;
+    tank.currentSpeed = THREE.MathUtils.lerp(tank.currentSpeed, targetSpeed, 5 * delta);
+    
+    // Calculate acceleration (difference between target and current)
+    // If accelerating forward (target < current), diff is negative. Pitch should be positive (nose up).
+    // If braking (target > current), diff is positive. Pitch should be negative (nose down).
+    const accel = (targetSpeed - tank.currentSpeed);
+    const targetPitch = -accel * 0.015; // Scale factor
+    
+    // Smoothly apply pitch
+    tank.innerMesh.rotation.x = THREE.MathUtils.lerp(tank.innerMesh.rotation.x, targetPitch, 10 * delta);
+
+    let forward = tank.currentSpeed * delta;
 
     // Animate tracks
     // Tank width approx 4.4, radius 2.2
