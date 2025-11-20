@@ -9,6 +9,8 @@ const ENEMY_SPEED = 4;
 const TANK_ROTATION_SPEED = 2;
 const PROJECTILE_SPEED = 30;
 const FIRE_COOLDOWN = 2.0; // Seconds
+const ENEMY_FIRE_COOLDOWN = 5.0;
+const RADAR_RANGE = 150;
 
 // --- Scene Setup ---
 const scene = new THREE.Scene();
@@ -24,6 +26,73 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
+
+// --- UI: Radar ---
+const radarCanvas = document.createElement('canvas');
+radarCanvas.width = 200;
+radarCanvas.height = 200;
+radarCanvas.style.position = 'absolute';
+radarCanvas.style.top = '20px';
+radarCanvas.style.left = '20px';
+radarCanvas.style.width = '150px';
+radarCanvas.style.height = '150px';
+radarCanvas.style.borderRadius = '50%';
+radarCanvas.style.backgroundColor = 'rgba(46, 52, 64, 0.8)'; // Nord0
+radarCanvas.style.border = '2px solid #88C0D0'; // Nord8
+document.body.appendChild(radarCanvas);
+
+const radarCtx = radarCanvas.getContext('2d');
+
+function updateRadar() {
+    const width = radarCanvas.width;
+    const height = radarCanvas.height;
+    const cx = width / 2;
+    const cy = height / 2;
+    const scale = (width / 2) / RADAR_RANGE;
+    
+    radarCtx.clearRect(0, 0, width, height);
+    
+    // Background/Rings
+    radarCtx.strokeStyle = 'rgba(136, 192, 208, 0.3)'; // Nord8 transparent
+    radarCtx.lineWidth = 2;
+    radarCtx.beginPath();
+    radarCtx.arc(cx, cy, width * 0.45, 0, Math.PI * 2);
+    radarCtx.stroke();
+    radarCtx.beginPath();
+    radarCtx.arc(cx, cy, width * 0.25, 0, Math.PI * 2);
+    radarCtx.stroke();
+    
+    // Player (Center)
+    radarCtx.fillStyle = '#88C0D0'; // Nord8
+    radarCtx.beginPath();
+    radarCtx.moveTo(cx, cy - 8);
+    radarCtx.lineTo(cx - 6, cy + 6);
+    radarCtx.lineTo(cx + 6, cy + 6);
+    radarCtx.fill();
+
+    // Enemies
+    const invQuat = tank.mesh.quaternion.clone().invert();
+    
+    enemies.forEach(enemy => {
+        const relPos = enemy.mesh.position.clone().sub(tank.mesh.position);
+        relPos.applyQuaternion(invQuat);
+        
+        // relPos.z is forward (negative) / backward (positive)
+        // relPos.x is right (positive) / left (negative)
+        
+        const dist = relPos.length();
+        
+        if (dist < RADAR_RANGE) {
+            const px = cx + relPos.x * scale;
+            const py = cy + relPos.z * scale;
+            
+            radarCtx.fillStyle = '#BF616A'; // Nord11
+            radarCtx.beginPath();
+            radarCtx.arc(px, py, 5, 0, Math.PI * 2);
+            radarCtx.fill();
+        }
+    });
+}
 
 // --- Sky Dome ---
 const vertexShader = `
@@ -176,7 +245,14 @@ function createEnemyTank(pos) {
     innerGroup.add(rightMuffler);
 
     scene.add(tankGroup);
-    enemies.push({ mesh: tankGroup, innerMesh: innerGroup, leftTrackTexture, rightTrackTexture, lastTrackPos: pos.clone() });
+    enemies.push({ 
+        mesh: tankGroup, 
+        innerMesh: innerGroup, 
+        leftTrackTexture, 
+        rightTrackTexture, 
+        lastTrackPos: pos.clone(),
+        lastFireTime: -100 // Initialize cooldown
+    });
 }
 
 // --- Track Marks ---
@@ -709,6 +785,7 @@ function shoot() {
     direction.applyQuaternion(tank.turret.getWorldQuaternion(new THREE.Quaternion()));
     
     projectile.userData.velocity = direction.multiplyScalar(PROJECTILE_SPEED);
+    projectile.userData.owner = 'player'; // Tag as player projectile
     
     scene.add(projectile);
     projectiles.push(projectile);
@@ -719,6 +796,34 @@ function shoot() {
     
     // Pitch Kick (Nose Up)
     tank.innerMesh.rotation.x += 0.1;
+}
+
+function enemyShoot(enemy) {
+    const now = clock.getElapsedTime();
+    if (now - enemy.lastFireTime < ENEMY_FIRE_COOLDOWN) return;
+    
+    enemy.lastFireTime = now;
+
+    const projectile = new THREE.Mesh(projectileGeo, projectileMat);
+    
+    // Start position (approximate barrel tip for enemy)
+    // Enemy structure: mesh -> innerMesh -> turret -> barrel
+    // We can just use the enemy position + offset rotated by quaternion
+    const startPos = new THREE.Vector3(0, 3.25, -2.5); // Turret height + barrel offset
+    startPos.applyQuaternion(enemy.mesh.quaternion);
+    startPos.add(enemy.mesh.position);
+    
+    projectile.position.copy(startPos);
+    
+    // Direction
+    const direction = new THREE.Vector3(0, 0, -1);
+    direction.applyQuaternion(enemy.mesh.quaternion);
+    
+    projectile.userData.velocity = direction.multiplyScalar(PROJECTILE_SPEED);
+    projectile.userData.owner = 'enemy'; // Tag as enemy projectile
+    
+    scene.add(projectile);
+    projectiles.push(projectile);
 }
 
 // --- Explosions ---
@@ -925,6 +1030,7 @@ function animate() {
     tank.barrel.position.z = THREE.MathUtils.lerp(tank.barrel.position.z, -2.5, 5 * delta);
 
     updateChunks();
+    updateRadar();
     updateParticles(delta);
     updateExhaust(delta);
     updateTrackMarks(delta);
@@ -983,6 +1089,11 @@ function animate() {
                 const targetPos = enemy.mesh.position.clone().addScaledVector(direction, moveAmount);
                 if (!checkCollision(targetPos, enemy.mesh.quaternion, enemy.mesh)) {
                     enemy.mesh.position.copy(targetPos);
+                }
+
+                // Shoot if facing player
+                if (Math.abs(diff) < 0.1) {
+                    enemyShoot(enemy);
                 }
 
                 // Exhaust
@@ -1178,17 +1289,27 @@ function animate() {
 
         // Check Enemy Collision
         let hitEnemy = false;
-        for (let j = enemies.length - 1; j >= 0; j--) {
-            const enemy = enemies[j];
-            if (p.position.distanceTo(enemy.mesh.position) < 4) {
-                createExplosion(enemy.mesh.position, new THREE.Color(0xBF616A)); // Red explosion
-                scene.remove(enemy.mesh);
-                enemies.splice(j, 1);
-                
+        if (p.userData.owner === 'player') {
+            for (let j = enemies.length - 1; j >= 0; j--) {
+                const enemy = enemies[j];
+                if (p.position.distanceTo(enemy.mesh.position) < 4) {
+                    createExplosion(enemy.mesh.position, new THREE.Color(0xBF616A)); // Red explosion
+                    scene.remove(enemy.mesh);
+                    enemies.splice(j, 1);
+                    
+                    scene.remove(p);
+                    projectiles.splice(i, 1);
+                    hitEnemy = true;
+                    break;
+                }
+            }
+        } else if (p.userData.owner === 'enemy') {
+            if (p.position.distanceTo(tank.mesh.position) < 4) {
+                createExplosion(tank.mesh.position, new THREE.Color(0x5E81AC)); // Blue explosion
+                // Visual feedback only for now
                 scene.remove(p);
                 projectiles.splice(i, 1);
                 hitEnemy = true;
-                break;
             }
         }
         if (hitEnemy) continue;
