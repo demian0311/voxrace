@@ -3,7 +3,7 @@ import * as THREE from 'three';
 // --- Configuration ---
 const VOXEL_SIZE = 5;
 const CHUNK_SIZE = 10;
-const DRAW_DISTANCE = 8;
+const DRAW_DISTANCE = 12;
 const TANK_SPEED = 20;
 const ENEMY_SPEED = 4;
 const TANK_ROTATION_SPEED = 2;
@@ -15,7 +15,7 @@ const scene = new THREE.Scene();
 const HORIZON_COLOR = 0xECEFF4; // Nord6
 const SKY_COLOR = 0x81A1C1; // Nord9
 
-scene.fog = new THREE.Fog(HORIZON_COLOR, 50, 300);
+scene.fog = new THREE.FogExp2(HORIZON_COLOR, 0.005);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 camera.position.set(0, 20, 30);
@@ -45,7 +45,7 @@ void main() {
     gl_FragColor = vec4( mix( bottomColor, topColor, max( pow( max( h , 0.0), exponent ), 0.0 ) ), 1.0 );
 }`;
 
-const skyGeo = new THREE.SphereGeometry(500, 32, 15);
+const skyGeo = new THREE.SphereGeometry(800, 32, 15);
 const skyMat = new THREE.ShaderMaterial({
     vertexShader: vertexShader,
     fragmentShader: fragmentShader,
@@ -53,7 +53,7 @@ const skyMat = new THREE.ShaderMaterial({
         topColor: { value: new THREE.Color(SKY_COLOR) },
         bottomColor: { value: new THREE.Color(HORIZON_COLOR) },
         offset: { value: 10 },
-        exponent: { value: 0.6 }
+        exponent: { value: 2.0 }
     },
     side: THREE.BackSide
 });
@@ -160,6 +160,20 @@ function createEnemyTank(pos) {
     rightTrack.position.set(2.2, 0.75, 0);
     rightTrack.castShadow = true;
     innerGroup.add(rightTrack);
+
+    // Mufflers
+    const mufflerGeo = new THREE.CylinderGeometry(0.25, 0.25, 1.2, 8);
+    const mufflerMat = new THREE.MeshStandardMaterial({ color: 0x2E3440 }); // Nord0
+    
+    const leftMuffler = new THREE.Mesh(mufflerGeo, mufflerMat);
+    leftMuffler.position.set(-1.4, 3.1, 2.2);
+    leftMuffler.castShadow = true;
+    innerGroup.add(leftMuffler);
+
+    const rightMuffler = new THREE.Mesh(mufflerGeo, mufflerMat);
+    rightMuffler.position.set(1.4, 3.1, 2.2);
+    rightMuffler.castShadow = true;
+    innerGroup.add(rightMuffler);
 
     scene.add(tankGroup);
     enemies.push({ mesh: tankGroup, innerMesh: innerGroup, leftTrackTexture, rightTrackTexture, lastTrackPos: pos.clone() });
@@ -328,8 +342,8 @@ function generateChunk(cx, cz) {
             // Clouds
             // Simple noise-like pattern
             const cloudNoise = Math.sin(gx * 0.1) + Math.sin(gz * 0.15) + Math.sin((gx + gz) * 0.05);
-            if (cloudNoise > 1.8) {
-                const cloudHeight = 20 + Math.floor(Math.abs(Math.sin(gx * 0.5)) * 3);
+            if (cloudNoise > 1.4) {
+                const cloudHeight = 10 + Math.floor(Math.abs(Math.sin(gx * 0.5)) * 3);
                 
                 dummy.position.set(gx * VOXEL_SIZE, cloudHeight * VOXEL_SIZE, gz * VOXEL_SIZE);
                 dummy.updateMatrix();
@@ -368,11 +382,18 @@ function generateChunk(cx, cz) {
     return { mesh, keys: chunkKeys };
 }
 
+let lastChunkX = null;
+let lastChunkZ = null;
+
 function updateChunks() {
     const tankPos = tank.mesh.position;
     const cx = Math.floor(tankPos.x / (VOXEL_SIZE * CHUNK_SIZE));
     const cz = Math.floor(tankPos.z / (VOXEL_SIZE * CHUNK_SIZE));
     
+    if (cx === lastChunkX && cz === lastChunkZ) return;
+    lastChunkX = cx;
+    lastChunkZ = cz;
+
     const activeKeys = new Set();
     
     for (let x = -DRAW_DISTANCE; x <= DRAW_DISTANCE; x++) {
@@ -631,6 +652,20 @@ function createTank() {
     rightTrack.castShadow = true;
     innerGroup.add(rightTrack);
 
+    // Mufflers
+    const mufflerGeo = new THREE.CylinderGeometry(0.25, 0.25, 1.2, 8);
+    const mufflerMat = new THREE.MeshStandardMaterial({ color: 0x2E3440 }); // Nord0
+    
+    const leftMuffler = new THREE.Mesh(mufflerGeo, mufflerMat);
+    leftMuffler.position.set(-1.4, 3.1, 2.2);
+    leftMuffler.castShadow = true;
+    innerGroup.add(leftMuffler);
+
+    const rightMuffler = new THREE.Mesh(mufflerGeo, mufflerMat);
+    rightMuffler.position.set(1.4, 3.1, 2.2);
+    rightMuffler.castShadow = true;
+    innerGroup.add(rightMuffler);
+
     return { mesh: tankGroup, innerMesh: innerGroup, turret: turret, barrel: barrel, leftTrackTexture: leftTrackTexture, rightTrackTexture: rightTrackTexture, currentSpeed: 0 };
 }
 
@@ -773,6 +808,49 @@ function updateParticles(delta) {
     }
 }
 
+// --- Exhaust ---
+const exhaustParticles = [];
+const exhaustGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+const exhaustMat = new THREE.MeshBasicMaterial({ color: 0x2E3440, transparent: true, opacity: 0.6 });
+
+function createExhaust(pos) {
+    const mesh = new THREE.Mesh(exhaustGeo, exhaustMat.clone());
+    mesh.position.copy(pos);
+    
+    // Random offset
+    mesh.position.x += (Math.random() - 0.5) * 0.2;
+    mesh.position.z += (Math.random() - 0.5) * 0.2;
+    
+    mesh.userData = {
+        velocity: new THREE.Vector3(
+            (Math.random() - 0.5) * 0.5,
+            Math.random() * 2 + 1,
+            (Math.random() - 0.5) * 0.5
+        ),
+        life: 1.0 + Math.random() * 0.5
+    };
+    
+    scene.add(mesh);
+    exhaustParticles.push(mesh);
+}
+
+function updateExhaust(delta) {
+    for (let i = exhaustParticles.length - 1; i >= 0; i--) {
+        const p = exhaustParticles[i];
+        p.userData.life -= delta;
+        
+        if (p.userData.life <= 0) {
+            scene.remove(p);
+            p.material.dispose();
+            exhaustParticles.splice(i, 1);
+            continue;
+        }
+        
+        p.position.addScaledVector(p.userData.velocity, delta);
+        p.material.opacity = (p.userData.life / 1.5) * 0.6;
+    }
+}
+
 // --- Input Handling ---
 const keys = {
     w: false,
@@ -840,11 +918,15 @@ function animate() {
         tank.barrel.material.color.setHex(0x88C0D0); // Nord8 (Original Blue/Ready)
     }
 
+    // Sky follows tank
+    sky.position.copy(tank.mesh.position);
+
     // Barrel Recoil Recovery
     tank.barrel.position.z = THREE.MathUtils.lerp(tank.barrel.position.z, -2.5, 5 * delta);
 
     updateChunks();
     updateParticles(delta);
+    updateExhaust(delta);
     updateTrackMarks(delta);
     spawnTrackMarks(tank);
 
@@ -902,6 +984,17 @@ function animate() {
                 if (!checkCollision(targetPos, enemy.mesh.quaternion, enemy.mesh)) {
                     enemy.mesh.position.copy(targetPos);
                 }
+
+                // Exhaust
+                if (Math.random() > 0.8) {
+                     const offset = new THREE.Vector3(1.4, 3.8, 2.2);
+                     offset.applyMatrix4(enemy.innerMesh.matrixWorld);
+                     createExhaust(offset);
+                     
+                     const offset2 = new THREE.Vector3(-1.4, 3.8, 2.2);
+                     offset2.applyMatrix4(enemy.innerMesh.matrixWorld);
+                     createExhaust(offset2);
+                }
             }
         }
         
@@ -953,6 +1046,19 @@ function animate() {
     // Momentum & Pitch
     const targetSpeed = forwardInput * TANK_SPEED;
     tank.currentSpeed = THREE.MathUtils.lerp(tank.currentSpeed, targetSpeed, 5 * delta);
+
+    // Exhaust
+    if (Math.abs(tank.currentSpeed) > 1.0) {
+        if (Math.random() > 0.7) {
+             const offset = new THREE.Vector3(1.4, 3.8, 2.2);
+             offset.applyMatrix4(tank.innerMesh.matrixWorld);
+             createExhaust(offset);
+             
+             const offset2 = new THREE.Vector3(-1.4, 3.8, 2.2);
+             offset2.applyMatrix4(tank.innerMesh.matrixWorld);
+             createExhaust(offset2);
+        }
+    }
     
     // Calculate acceleration (difference between target and current)
     // If accelerating forward (target < current), diff is negative. Pitch should be positive (nose up).
