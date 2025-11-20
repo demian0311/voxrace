@@ -1,7 +1,10 @@
 body {
     margin: 0;
     overflow: hidden;
-    background-color: #81A1C1; /* Nord9 */
+    background-color: #2E3440; /* Nord0 */
+}
+canvas {
+    display: block;
 }
 #info {
     position: absolute;
