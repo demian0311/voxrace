@@ -1,0 +1,17 @@
+body {
+    margin: 0;
+    overflow: hidden;
+    background-color: #81A1C1; /* Nord9 */
+}
+#info {
+    position: absolute;
+    top: 10px;
+    width: 100%;
+    text-align: center;
+    color: #ECEFF4; /* Nord6 */
+    font-family: sans-serif;
+    font-weight: bold;
+    text-shadow: 1px 1px 2px #2E3440; /* Nord0 */
+    pointer-events: none;
+    user-select: none;
+}
