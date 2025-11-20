@@ -342,6 +342,76 @@ function getTerrainHeight(x, z) {
     return heightMap[key] !== undefined ? heightMap[key] : -100; // Fallback if off map
 }
 
+function attemptPush(pos, direction) {
+    const halfWidth = 2; 
+    const halfLength = 3;
+    const points = [
+        new THREE.Vector3(halfWidth, 1, halfLength),
+        new THREE.Vector3(-halfWidth, 1, halfLength),
+        new THREE.Vector3(halfWidth, 1, -halfLength),
+        new THREE.Vector3(-halfWidth, 1, -halfLength)
+    ];
+    
+    let pushedAny = false;
+
+    for (const p of points) {
+        const worldP = p.clone().applyQuaternion(tank.mesh.quaternion).add(pos);
+        const gx = Math.round(worldP.x / VOXEL_SIZE);
+        const gy = Math.round((worldP.y + VOXEL_SIZE/2) / VOXEL_SIZE);
+        const gz = Math.round(worldP.z / VOXEL_SIZE);
+        const key = getVoxelKey(gx, gy, gz);
+        
+        if (voxelMap.has(key)) {
+            const { mesh, index } = voxelMap.get(key);
+            const color = new THREE.Color();
+            mesh.getColorAt(index, color);
+            
+            // Check if Snow (Nord5) - Light colored
+            if (color.getHex() === COLORS[3].getHex()) {
+                // Determine push direction (snap to axis)
+                const pushX = Math.abs(direction.x) > Math.abs(direction.z) ? Math.sign(direction.x) : 0;
+                const pushZ = Math.abs(direction.z) >= Math.abs(direction.x) ? Math.sign(direction.z) : 0;
+                
+                // Don't push up/down or nowhere
+                if (pushX === 0 && pushZ === 0) continue;
+
+                const nextGx = gx + pushX;
+                const nextGz = gz + pushZ;
+                const nextKey = getVoxelKey(nextGx, gy, nextGz);
+                
+                // Check if destination is empty
+                if (!voxelMap.has(nextKey)) {
+                    // Check if there is ground below the new position (so it doesn't float)
+                    const groundKey = getVoxelKey(nextGx, gy - 1, nextGz);
+                    if (voxelMap.has(groundKey)) {
+                        // Move it
+                        const dummy = new THREE.Object3D();
+                        const matrix = new THREE.Matrix4();
+                        mesh.getMatrixAt(index, matrix);
+                        
+                        // Calculate new position
+                        const newPos = new THREE.Vector3(nextGx * VOXEL_SIZE, (gy * VOXEL_SIZE) - (VOXEL_SIZE/2), nextGz * VOXEL_SIZE);
+                        
+                        dummy.position.copy(newPos);
+                        dummy.updateMatrix();
+                        mesh.setMatrixAt(index, dummy.matrix);
+                        mesh.instanceMatrix.needsUpdate = true;
+                        
+                        voxelMap.delete(key);
+                        voxelMap.set(nextKey, { mesh, index });
+                        
+                        updateHeightMap(gx, gz);
+                        updateHeightMap(nextGx, nextGz);
+                        
+                        pushedAny = true;
+                    }
+                }
+            }
+        }
+    }
+    return pushedAny;
+}
+
 function checkCollision(pos, quat, selfMesh = null) {
     const halfWidth = 2; 
     const halfLength = 3;
@@ -529,6 +599,31 @@ function createExplosion(pos, blockColor) {
     }
 }
 
+function createRicochet(pos, incomingVelocity) {
+    const nordRed = new THREE.Color(0xBF616A);
+    const nordYellow = new THREE.Color(0xEBCB8B);
+    
+    const baseDir = incomingVelocity.clone().normalize().negate();
+
+    for (let i = 0; i < 4; i++) {
+        const pColor = Math.random() > 0.5 ? nordRed : nordYellow;
+        const material = new THREE.MeshStandardMaterial({ color: pColor });
+        const particle = new THREE.Mesh(particleGeo, material);
+        
+        particle.position.copy(pos);
+        
+        const velocity = baseDir.clone().add(new THREE.Vector3(
+            (Math.random() - 0.5),
+            (Math.random() - 0.5),
+            (Math.random() - 0.5)
+        )).normalize().multiplyScalar(15);
+        
+        particle.userData = { velocity: velocity, life: 0.5 }; 
+        scene.add(particle);
+        particles.push(particle);
+    }
+}
+
 function updateParticles(delta) {
     for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
@@ -698,6 +793,9 @@ function animate() {
         const currentPos = tank.mesh.position.clone();
         const targetPos = currentPos.clone().add(direction);
         
+        // Try to push blocks
+        attemptPush(targetPos, direction);
+
         if (!checkCollision(targetPos, tank.mesh.quaternion, tank.mesh)) {
             tank.mesh.position.copy(targetPos);
         } else {
@@ -746,6 +844,7 @@ function animate() {
             mesh.getColorAt(index, color);
 
             if (color.getHex() === BLUE_COLOR.getHex()) {
+                createRicochet(p.position, p.userData.velocity);
                 scene.remove(p);
                 projectiles.splice(i, 1);
                 continue;
