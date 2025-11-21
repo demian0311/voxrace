@@ -53,6 +53,7 @@ function updateRadar() {
     const cx = width / 2;
     const cy = height / 2;
     const scale = (width / 2) / RADAR_RANGE;
+    const now = clock.getElapsedTime();
     
     radarCtx.clearRect(0, 0, width, height);
     
@@ -74,6 +75,15 @@ function updateRadar() {
     radarCtx.lineTo(cx + 6, cy + 6);
     radarCtx.fill();
 
+    // Player Firing Indicator
+    if (now - lastFireTime < 0.2) {
+        radarCtx.strokeStyle = '#EBCB8B'; // Nord13 (Yellow)
+        radarCtx.lineWidth = 3;
+        radarCtx.beginPath();
+        radarCtx.arc(cx, cy, 12, 0, Math.PI * 2);
+        radarCtx.stroke();
+    }
+
     // Enemies
     const invQuat = tank.mesh.quaternion.clone().invert();
     
@@ -93,6 +103,38 @@ function updateRadar() {
             radarCtx.fillStyle = '#BF616A'; // Nord11
             radarCtx.beginPath();
             radarCtx.arc(px, py, 5, 0, Math.PI * 2);
+            radarCtx.fill();
+
+            // Enemy Firing Indicator
+            if (now - enemy.lastFireTime < 0.2) {
+                radarCtx.strokeStyle = '#EBCB8B'; // Nord13 (Yellow)
+                radarCtx.lineWidth = 2;
+                radarCtx.beginPath();
+                radarCtx.arc(px, py, 8, 0, Math.PI * 2);
+                radarCtx.stroke();
+            }
+        }
+    });
+
+    // Projectiles
+    projectiles.forEach(p => {
+        const relPos = p.position.clone().sub(tank.mesh.position);
+        relPos.applyQuaternion(invQuat);
+        
+        const dist = relPos.length();
+        
+        if (dist < RADAR_RANGE) {
+            const px = cx + relPos.x * scale;
+            const py = cy + relPos.z * scale;
+            
+            if (p.userData.owner === 'player') {
+                radarCtx.fillStyle = '#88C0D0'; // Nord8 (Blue - Friendly)
+            } else {
+                radarCtx.fillStyle = '#EBCB8B'; // Nord13 (Yellow - Warning)
+            }
+            
+            radarCtx.beginPath();
+            radarCtx.arc(px, py, 2, 0, Math.PI * 2);
             radarCtx.fill();
         }
     });
@@ -220,10 +262,51 @@ pauseOverlay.appendChild(pauseText);
 
 document.body.appendChild(pauseOverlay);
 
+let savedCameraState = null;
+
+function pauseAnimate() {
+    if (!isPaused) return;
+    requestAnimationFrame(pauseAnimate);
+
+    const tankPos = tank.mesh.position;
+    const angle = Date.now() * 0.0002;
+    const radius = 100;
+    
+    // Target position (Top down rotating)
+    const targetPos = new THREE.Vector3(
+        tankPos.x + Math.cos(angle) * radius,
+        150,
+        tankPos.z + Math.sin(angle) * radius
+    );
+    
+    // Smoothly move there from current position
+    camera.position.lerp(targetPos, 0.05);
+    camera.lookAt(tankPos);
+
+    renderer.render(scene, camera);
+}
+
 function setPaused(state) {
     if (isGameOver) return;
+    if (state === isPaused) return;
+    
     isPaused = state;
     pauseOverlay.style.display = isPaused ? 'flex' : 'none';
+
+    if (isPaused) {
+        // Save state
+        savedCameraState = {
+            position: camera.position.clone(),
+            quaternion: camera.quaternion.clone()
+        };
+        pauseAnimate();
+    } else {
+        // Restore state
+        if (savedCameraState) {
+            camera.position.copy(savedCameraState.position);
+            camera.quaternion.copy(savedCameraState.quaternion);
+        }
+    }
 }
 
 // --- Sky Dome ---
@@ -274,6 +357,27 @@ dirLight.shadow.camera.bottom = -100;
 dirLight.shadow.mapSize.width = 2048;
 dirLight.shadow.mapSize.height = 2048;
 scene.add(dirLight);
+scene.add(dirLight.target);
+
+// --- Target Indicator ---
+const targetIndicator = new THREE.Group();
+const ringGeo = new THREE.RingGeometry(3, 3.5, 32);
+const ringMat = new THREE.MeshBasicMaterial({ color: 0xBF616A, side: THREE.DoubleSide, transparent: true, opacity: 0.8 }); // Nord11
+const ring = new THREE.Mesh(ringGeo, ringMat);
+ring.rotation.x = -Math.PI / 2;
+targetIndicator.add(ring);
+
+const arrowGeo = new THREE.ConeGeometry(1, 2, 4);
+const arrowMat = new THREE.MeshBasicMaterial({ color: 0xBF616A });
+const arrow = new THREE.Mesh(arrowGeo, arrowMat);
+arrow.position.y = 4;
+arrow.rotation.x = Math.PI; // Point down
+targetIndicator.add(arrow);
+
+targetIndicator.visible = false;
+scene.add(targetIndicator);
+
+const targetRaycaster = new THREE.Raycaster();
 
 // --- Voxel World Generation ---
 const voxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
@@ -375,15 +479,15 @@ const wheelBase = new THREE.CylinderGeometry(0.6, 0.6, 0.5, 16);
 wheelBase.rotateX(Math.PI / 2);
 // Car center is roughly x=3, y=1.05 relative to original shape
 // Relative positions:
-const w1 = wheelBase.clone().translate(1.8, -0.5, 1.6); // Front Left
-const w2 = wheelBase.clone().translate(1.8, -0.5, -1.6); // Front Right
-const w3 = wheelBase.clone().translate(-1.8, -0.5, 1.6); // Rear Left
-const w4 = wheelBase.clone().translate(-1.8, -0.5, -1.6); // Rear Right
+const w1 = wheelBase.clone().translate(1.8, -0.8, 1.6); // Front Left
+const w2 = wheelBase.clone().translate(1.8, -0.8, -1.6); // Front Right
+const w3 = wheelBase.clone().translate(-1.8, -0.8, 1.6); // Rear Left
+const w4 = wheelBase.clone().translate(-1.8, -0.8, -1.6); // Rear Right
 const carWheelGeometry = mergeBufferGeometries([w1, w2, w3, w4]);
 const carWheelMaterial = new THREE.MeshStandardMaterial({ color: 0x2E3440 }); // Nord0 (Dark Gray)
 
 // Windows
-const glassMat = new THREE.MeshStandardMaterial({ color: 0x88C0D0, roughness: 0.2, metalness: 0.8 }); // Nord8
+const glassMat = new THREE.MeshStandardMaterial({ color: 0x88C0D0, roughness: 0.5, metalness: 0.0 }); // Nord8
 // Windshield slope is roughly 45 degrees at x=4.0, y=1.6 (relative 1.0, 0.55)
 const windshield = new THREE.BoxGeometry(0.1, 1.6, 3.0);
 windshield.rotateZ(Math.PI / 4);
@@ -649,7 +753,8 @@ function generateChunk(cx, cz) {
                         mesh.setColorAt(index, BLUE_COLOR);
                     } else {
                         // Hills are snowy (CARS) or teal
-                        if (rng() > 0.5) {
+                        // Increased car chance to 80%
+                        if (rng() > 0.2) {
                             isCar = true;
                         } else {
                             mesh.setColorAt(index, COLORS[1]); // Teal
@@ -657,6 +762,9 @@ function generateChunk(cx, cz) {
                     }
                     
                     if (isCar) {
+                        // Lower car to sit on ground
+                        dummy.position.y = 1.4;
+
                         // Random rotation for car
                         dummy.rotation.y = (Math.floor(rng() * 4) * Math.PI) / 2;
                         dummy.updateMatrix();
@@ -674,14 +782,14 @@ function generateChunk(cx, cz) {
                         ];
                         const cColor = carColors[Math.floor(rng() * carColors.length)];
 
-                        // 50% Chance to be a moving car
-                        if (rng() < 0.5) {
+                        // 80% Chance to be a moving car
+                        if (rng() < 0.8) {
                             // Create Entity
                             // Position: gx, 1, gz is the hill block.
                             // Car sits on top of it.
                             // Static car matrix was set at: gx * VOXEL_SIZE, VOXEL_SIZE / 2, gz * VOXEL_SIZE
                             // Which is y = 2.5.
-                            const carPos = new THREE.Vector3(gx * VOXEL_SIZE, VOXEL_SIZE / 2, gz * VOXEL_SIZE);
+                            const carPos = new THREE.Vector3(gx * VOXEL_SIZE, 1.4, gz * VOXEL_SIZE);
                             createCivilianCar(carPos, cColor);
                             
                             // Random rotation
@@ -1317,6 +1425,40 @@ function restartGame() {
 function gameOver() {
     isGameOver = true;
     
+    // Move camera to top-down view
+    const tankPos = tank.mesh.position;
+    const topDownPos = new THREE.Vector3(tankPos.x, 150, tankPos.z + 50); // High up, slightly offset
+    
+    // Animate camera to position
+    const startPos = camera.position.clone();
+    const startRot = camera.quaternion.clone();
+    
+    const dummyCam = new THREE.PerspectiveCamera();
+    dummyCam.position.copy(topDownPos);
+    dummyCam.lookAt(tankPos);
+    const endRot = dummyCam.quaternion;
+
+    let progress = 0;
+    function animateGameOverCam() {
+        if (!isGameOver) return;
+        requestAnimationFrame(animateGameOverCam);
+        
+        progress += 0.01;
+        if (progress <= 1) {
+            camera.position.lerpVectors(startPos, topDownPos, progress);
+            camera.quaternion.slerp(endRot, progress);
+        } else {
+            // Rotate slowly around
+            const angle = Date.now() * 0.0002;
+            const radius = 100;
+            camera.position.x = tankPos.x + Math.cos(angle) * radius;
+            camera.position.z = tankPos.z + Math.sin(angle) * radius;
+            camera.lookAt(tankPos);
+        }
+        renderer.render(scene, camera);
+    }
+    animateGameOverCam();
+
     const overlay = document.createElement('div');
     overlay.id = 'gameOverOverlay';
     overlay.style.position = 'absolute';
@@ -1796,7 +1938,10 @@ function animate() {
     if (isGameOver) return;
     requestAnimationFrame(animate);
 
-    const delta = clock.getDelta();
+    let delta = clock.getDelta();
+    // Cap delta to prevent jitter/physics explosions after pauses or tab switches
+    delta = Math.min(delta, 0.1);
+
     if (isPaused) return;
 
     const now = clock.getElapsedTime();
@@ -1808,6 +1953,10 @@ function animate() {
 
     // Sky follows tank
     sky.position.copy(tank.mesh.position);
+
+    // Light follows tank
+    dirLight.position.set(tank.mesh.position.x + 50, tank.mesh.position.y + 100, tank.mesh.position.z + 50);
+    dirLight.target.position.copy(tank.mesh.position);
 
     // Barrel Recoil Recovery
     tank.barrel.position.z = THREE.MathUtils.lerp(tank.barrel.position.z, -2.5, 5 * delta);
@@ -1892,9 +2041,9 @@ function animate() {
         // Gravity
         const h = getTerrainHeight(civ.mesh.position.x, civ.mesh.position.z);
         if (h > -50) {
-            // Match static car height (approx 2.5 above ground level 0)
-            // If h is 0, y should be 2.5.
-            civ.mesh.position.y = THREE.MathUtils.lerp(civ.mesh.position.y, h + 2.5, 0.1);
+            // Match static car height (approx 1.4 above ground level 0)
+            // If h is 0, y should be 1.4.
+            civ.mesh.position.y = THREE.MathUtils.lerp(civ.mesh.position.y, h + 1.4, 0.1);
         } else {
             civ.mesh.position.y -= 9.8 * delta;
         }
@@ -2185,7 +2334,9 @@ function animate() {
             // Check Enemies
             for (let j = enemies.length - 1; j >= 0; j--) {
                 const enemy = enemies[j];
-                if (p.position.distanceTo(enemy.mesh.position) < 4) {
+                // Use a raised center point for collision to account for tank height
+                const enemyCenter = enemy.mesh.position.clone().add(new THREE.Vector3(0, 2, 0));
+                if (p.position.distanceTo(enemyCenter) < 3.5) {
                     createExplosion(enemy.mesh.position, new THREE.Color(0xBF616A)); // Red explosion
                     
                     // Death Smoke
@@ -2245,7 +2396,8 @@ function animate() {
                 }
             }
         } else if (p.userData.owner === 'enemy') {
-            if (p.position.distanceTo(tank.mesh.position) < 4) {
+            const tankCenter = tank.mesh.position.clone().add(new THREE.Vector3(0, 2, 0));
+            if (p.position.distanceTo(tankCenter) < 3.5) {
                 createExplosion(tank.mesh.position, new THREE.Color(0x5E81AC)); // Blue explosion
                 
                 takeDamage();
@@ -2270,6 +2422,53 @@ function animate() {
     const camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(tank.mesh.quaternion);
     const lookTarget = tank.mesh.position.clone().add(camForward.multiplyScalar(20));
     camera.lookAt(lookTarget);
+
+    // Target Acquisition
+    const startPos = new THREE.Vector3(0, 0, -5);
+    startPos.applyMatrix4(tank.turret.matrixWorld);
+    
+    const direction = new THREE.Vector3(0, 0, -1);
+    direction.applyQuaternion(tank.turret.getWorldQuaternion(new THREE.Quaternion()));
+
+    targetRaycaster.set(startPos, direction);
+    
+    // Intersect with enemies and world
+    const enemyMeshes = enemies.map(e => e.mesh);
+    const objectsToTest = [...enemyMeshes, ...worldGroup.children];
+    
+    const intersects = targetRaycaster.intersectObjects(objectsToTest, true);
+
+    let foundTarget = false;
+    if (intersects.length > 0) {
+        const firstHit = intersects[0];
+        
+        // Is it an enemy?
+        let hitEnemy = null;
+        let obj = firstHit.object;
+        while(obj) {
+            const enemy = enemies.find(e => e.mesh === obj);
+            if (enemy) {
+                hitEnemy = enemy;
+                break;
+            }
+            obj = obj.parent;
+        }
+
+        if (hitEnemy) {
+            foundTarget = true;
+            targetIndicator.visible = true;
+            targetIndicator.position.copy(hitEnemy.mesh.position);
+            targetIndicator.position.y += 5; // Float above
+            
+            // Animate
+            targetIndicator.children[1].position.y = 4 + Math.sin(now * 10) * 0.5; // Bounce arrow
+            targetIndicator.children[0].rotation.z += delta * 2; // Spin ring
+        }
+    }
+    
+    if (!foundTarget) {
+        targetIndicator.visible = false;
+    }
 
     renderer.render(scene, camera);
 }
