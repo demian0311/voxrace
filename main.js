@@ -602,7 +602,8 @@ function createEnemyTank(pos) {
         lastFireTime: -100, // Initialize cooldown
         turretMat: turretMat,
         offset: Math.random() * 4, // Random offset for activity cycle
-        hasBlindSpot: Math.random() < 0.9 // 90% chance to have a blind spot
+        hasBlindSpot: Math.random() < 0.9, // 90% chance to have a blind spot
+        alertedUntil: 0
     });
 }
 
@@ -1557,6 +1558,19 @@ function gameOver() {
     document.body.appendChild(overlay);
 }
 
+function triggerDirectionalFlash(sourcePos) {
+    const toSource = sourcePos.clone().sub(tank.mesh.position);
+    toSource.applyQuaternion(tank.mesh.quaternion.clone().invert());
+    toSource.normalize();
+    
+    const cx = 50 + toSource.x * 60; 
+    const cy = 50 + toSource.z * 60; 
+    
+    flashOverlay.style.background = `radial-gradient(circle at ${cx}% ${cy}%, rgba(235, 203, 139, 0.4) 0%, transparent 50%)`;
+    flashOverlay.style.opacity = '1';
+    flashTime = 0.3;
+}
+
 function enemyShoot(enemy) {
     const now = clock.getElapsedTime();
     if (now - gameStartTime < 5) return; // 5 second grace period
@@ -1587,18 +1601,10 @@ function enemyShoot(enemy) {
 
     createMuzzleFlash(startPos, direction, 3); // Less smoke for enemies
 
-    // Screen Flash Indicator
-    const toEnemy = enemy.mesh.position.clone().sub(tank.mesh.position);
-    toEnemy.applyQuaternion(tank.mesh.quaternion.clone().invert());
-    toEnemy.normalize();
-    
-    // Calculate screen position for flash center (x: right+, z: back+)
-    const cx = 50 + toEnemy.x * 60; 
-    const cy = 50 + toEnemy.z * 60; 
-    
-    flashOverlay.style.background = `radial-gradient(circle at ${cx}% ${cy}%, rgba(235, 203, 139, 0.4) 0%, transparent 50%)`;
-    flashOverlay.style.opacity = '1';
-    flashTime = 0.3;
+    // Screen Flash Indicator (Only if close)
+    if (tank.mesh.position.distanceTo(enemy.mesh.position) < 80) {
+        triggerDirectionalFlash(enemy.mesh.position);
+    }
 }
 
 // --- Explosions ---
@@ -2097,7 +2103,8 @@ function animate() {
         let rotationAmount = 0;
 
         // Activity Cycle: 3s Active, 1s Idle (75% Active)
-        const isActive = ((now + (enemy.offset || 0)) % 4) < 3;
+        const isAlerted = now < enemy.alertedUntil;
+        const isActive = isAlerted || ((now + (enemy.offset || 0)) % 4) < 3;
         const isFar = dist > RADAR_RANGE;
 
         if (isFar || (isActive && dist > 6)) { 
@@ -2116,9 +2123,9 @@ function animate() {
             
             // Check Blind Spot
             // If hasBlindSpot is true, only engage if player is within ~60 degrees (approx 1.0 radian)
-            // Ignore blind spot if far away (force pursue)
+            // Ignore blind spot if far away (force pursue) or alerted
             let canSee = true;
-            if (!isFar && enemy.hasBlindSpot && Math.abs(diff) > 1.0) {
+            if (!isFar && !isAlerted && enemy.hasBlindSpot && Math.abs(diff) > 1.0) {
                 canSee = false;
             }
 
@@ -2349,13 +2356,24 @@ function animate() {
         const key = getVoxelKey(gx, gy, gz);
 
         if (voxelMap.has(key)) {
+            // Alert enemies if player shot hits anything near them
+            if (p.userData.owner === 'player') {
+                const alertRadius = 50;
+                enemies.forEach(e => {
+                    if (e.mesh.position.distanceTo(p.position) < alertRadius) {
+                        e.alertedUntil = clock.getElapsedTime() + 10; // Alert for 10s
+                    }
+                });
+            }
+
             const { mesh, index, parts } = voxelMap.get(key);
             
             // Explosion Effect
             const color = new THREE.Color();
             if (mesh.instanceColor) mesh.getColorAt(index, color);
 
-            if (color.getHex() === BLUE_COLOR.getHex()) {
+            // Indestructible: Blue blocks or Ground Level (Road/Dirt)
+            if (color.getHex() === BLUE_COLOR.getHex() || gy === 0) {
                 createRicochet(p.position, p.userData.velocity);
                 scene.remove(p);
                 projectiles.splice(i, 1);
@@ -2474,6 +2492,12 @@ function animate() {
                 }
             }
         } else if (p.userData.owner === 'enemy') {
+            // Warning Flash for incoming rounds
+            if (!p.userData.warned && p.position.distanceTo(tank.mesh.position) < 20) {
+                triggerDirectionalFlash(p.position);
+                p.userData.warned = true;
+            }
+
             const tankCenter = tank.mesh.position.clone().add(new THREE.Vector3(0, 2, 0));
             if (p.position.distanceTo(tankCenter) < 3.5) {
                 createExplosion(tank.mesh.position, new THREE.Color(0x5E81AC)); // Blue explosion
