@@ -4,7 +4,7 @@ import * as THREE from 'three';
 const VOXEL_SIZE = 5;
 const CHUNK_SIZE = 10;
 const DRAW_DISTANCE = 12;
-const TANK_SPEED = 20;
+const TANK_SPEED = 30;
 const ENEMY_SPEED = 4;
 const TANK_ROTATION_SPEED = 2;
 const PROJECTILE_SPEED = 30;
@@ -284,7 +284,21 @@ scene.add(worldGroup);
 
 const chunks = new Map(); // Key: "cx,cz", Value: { mesh, keys[] }
 const voxelMap = new Map(); // Key: "gx,gy,gz", Value: { mesh, index }
+const instanceLookup = new Map(); // Key: mesh.uuid, Value: Map(instanceId -> voxelKey)
 const heightMap = {}; // Key: "gx,gz", Value: height
+
+function registerInstance(mesh, index, key) {
+    if (!instanceLookup.has(mesh.uuid)) {
+        instanceLookup.set(mesh.uuid, new Map());
+    }
+    instanceLookup.get(mesh.uuid).set(index, key);
+}
+
+function unregisterInstance(mesh, index) {
+    if (instanceLookup.has(mesh.uuid)) {
+        instanceLookup.get(mesh.uuid).delete(index);
+    }
+}
 
 function getChunkKey(cx, cz) { return `${cx},${cz}`; }
 function getVoxelKey(gx, gy, gz) { return `${gx},${gy},${gz}`; }
@@ -298,6 +312,90 @@ const COLORS = [
 const BLUE_COLOR = new THREE.Color(0x5E81AC); // Nord10
 const CLOUD_COLOR = new THREE.Color(0xD8DEE9); // Nord4
 
+// --- Car Block Geometry ---
+const carShape = new THREE.Shape();
+carShape.moveTo(0, 0);
+carShape.lineTo(6, 0); // Bottom
+carShape.lineTo(6, 1.0); // Front Bumper
+carShape.lineTo(4.5, 1.1); // Hood start
+carShape.lineTo(3.5, 2.1); // Windshield top
+carShape.lineTo(1.5, 2.1); // Roof end
+carShape.lineTo(0.5, 1.1); // Rear window bottom
+carShape.lineTo(0, 1.1); // Trunk end
+carShape.lineTo(0, 0); // Rear Bumper
+
+const carGeometry = new THREE.ExtrudeGeometry(carShape, {
+    depth: 3.2,
+    bevelEnabled: false
+});
+carGeometry.center();
+
+const carMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff }); // Allow instance color
+
+// --- Helper: Merge Geometries ---
+function mergeBufferGeometries(geometries) {
+    const attributes = {};
+    for (const name in geometries[0].attributes) {
+        const arrays = geometries.map(g => g.attributes[name].array);
+        const length = arrays.reduce((a, b) => a + b.length, 0);
+        const result = new geometries[0].attributes[name].array.constructor(length);
+        let offset = 0;
+        for (const arr of arrays) {
+            result.set(arr, offset);
+            offset += arr.length;
+        }
+        attributes[name] = new THREE.BufferAttribute(result, geometries[0].attributes[name].itemSize);
+    }
+    const geometry = new THREE.BufferGeometry();
+    for (const name in attributes) geometry.setAttribute(name, attributes[name]);
+    
+    if (geometries[0].index) {
+            const indexArrays = geometries.map(g => g.index.array);
+            const vertexCounts = geometries.map(g => g.attributes.position.count);
+            const totalIndexCount = indexArrays.reduce((a, b) => a + b.length, 0);
+            const resultIndex = new (totalIndexCount > 65535 ? Uint32Array : Uint16Array)(totalIndexCount);
+            let indexOffset = 0;
+            let vertexOffset = 0;
+            for (let i=0; i<geometries.length; i++) {
+                const arr = indexArrays[i];
+                for (let j=0; j<arr.length; j++) {
+                    resultIndex[indexOffset + j] = arr[j] + vertexOffset;
+                }
+                indexOffset += arr.length;
+                vertexOffset += vertexCounts[i];
+            }
+            geometry.setIndex(new THREE.BufferAttribute(resultIndex, 1));
+    }
+    return geometry;
+}
+
+// --- Car Details ---
+// Wheels
+const wheelBase = new THREE.CylinderGeometry(0.6, 0.6, 0.5, 16);
+wheelBase.rotateX(Math.PI / 2);
+// Car center is roughly x=3, y=1.05 relative to original shape
+// Relative positions:
+const w1 = wheelBase.clone().translate(1.8, -0.5, 1.6); // Front Left
+const w2 = wheelBase.clone().translate(1.8, -0.5, -1.6); // Front Right
+const w3 = wheelBase.clone().translate(-1.8, -0.5, 1.6); // Rear Left
+const w4 = wheelBase.clone().translate(-1.8, -0.5, -1.6); // Rear Right
+const carWheelGeometry = mergeBufferGeometries([w1, w2, w3, w4]);
+const carWheelMaterial = new THREE.MeshStandardMaterial({ color: 0x2E3440 }); // Nord0 (Dark Gray)
+
+// Windows
+const glassMat = new THREE.MeshStandardMaterial({ color: 0x88C0D0, roughness: 0.2, metalness: 0.8 }); // Nord8
+// Windshield slope is roughly 45 degrees at x=4.0, y=1.6 (relative 1.0, 0.55)
+const windshield = new THREE.BoxGeometry(0.1, 1.6, 3.0);
+windshield.rotateZ(Math.PI / 4);
+windshield.translate(1.0, 0.55, 0);
+
+// Rear window slope is roughly 45 degrees at x=1.0, y=1.6 (relative -2.0, 0.55)
+const rearWindow = new THREE.BoxGeometry(0.1, 1.6, 3.0);
+rearWindow.rotateZ(-Math.PI / 4);
+rearWindow.translate(-2.0, 0.55, 0);
+
+const carGlassGeometry = mergeBufferGeometries([windshield, rearWindow]);
+
 // --- Utilities ---
 function mulberry32(a) {
     return function() {
@@ -310,6 +408,7 @@ function mulberry32(a) {
 
 // --- Enemy Tanks ---
 const enemies = [];
+const civilians = [];
 
 function createEnemyTank(pos) {
     const tankGroup = new THREE.Group();
@@ -383,7 +482,39 @@ function createEnemyTank(pos) {
         rightTrackTexture, 
         lastTrackPos: pos.clone(),
         lastFireTime: -100, // Initialize cooldown
-        turretMat: turretMat
+        turretMat: turretMat,
+        offset: Math.random() * 4, // Random offset for activity cycle
+        hasBlindSpot: Math.random() < 0.9 // 90% chance to have a blind spot
+    });
+}
+
+function createCivilianCar(pos, color) {
+    const group = new THREE.Group();
+    group.position.copy(pos);
+    
+    // Body
+    const body = new THREE.Mesh(carGeometry, new THREE.MeshStandardMaterial({ color: color }));
+    body.castShadow = true;
+    body.receiveShadow = true;
+    group.add(body);
+    
+    // Wheels
+    const wheels = new THREE.Mesh(carWheelGeometry, carWheelMaterial);
+    wheels.castShadow = true;
+    wheels.receiveShadow = true;
+    group.add(wheels);
+    
+    // Glass
+    const glass = new THREE.Mesh(carGlassGeometry, glassMat);
+    glass.castShadow = true;
+    glass.receiveShadow = true;
+    group.add(glass);
+    
+    scene.add(group);
+    civilians.push({ 
+        mesh: group, 
+        speed: ENEMY_SPEED * 0.75, // Slower than enemies but moving
+        color: color
     });
 }
 
@@ -449,16 +580,30 @@ function updateTrackMarks(delta) {
 
 function generateChunk(cx, cz) {
     const dummy = new THREE.Object3D();
-    const maxInstances = CHUNK_SIZE * CHUNK_SIZE * 5; // Increased for clouds
+    const maxInstances = CHUNK_SIZE * CHUNK_SIZE * 5; 
+    
     const mesh = new THREE.InstancedMesh(voxelGeometry, grassMaterial, maxInstances);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
+
+    const carMesh = new THREE.InstancedMesh(carGeometry, carMaterial, maxInstances);
+    carMesh.castShadow = true;
+    carMesh.receiveShadow = true;
+
+    const wheelMesh = new THREE.InstancedMesh(carWheelGeometry, carWheelMaterial, maxInstances);
+    wheelMesh.castShadow = true;
+    wheelMesh.receiveShadow = true;
+
+    const glassMesh = new THREE.InstancedMesh(carGlassGeometry, glassMat, maxInstances);
+    glassMesh.castShadow = true;
+    glassMesh.receiveShadow = true;
     
     // Seeded RNG for consistent terrain
     const seed = (cx * 2654435761) ^ (cz * 2246822507);
     const rng = mulberry32(seed);
 
     let index = 0;
+    let carIndex = 0;
     const chunkKeys = [];
     const startX = cx * CHUNK_SIZE;
     const startZ = cz * CHUNK_SIZE;
@@ -470,6 +615,7 @@ function generateChunk(cx, cz) {
             
             // Base ground
             dummy.position.set(gx * VOXEL_SIZE, -VOXEL_SIZE / 2, gz * VOXEL_SIZE);
+            dummy.rotation.set(0, 0, 0);
             dummy.updateMatrix();
             mesh.setMatrixAt(index, dummy.matrix);
             
@@ -481,6 +627,7 @@ function generateChunk(cx, cz) {
             
             const baseKey = getVoxelKey(gx, 0, gz);
             voxelMap.set(baseKey, { mesh, index });
+            registerInstance(mesh, index, baseKey);
             chunkKeys.push(baseKey);
             index++;
             
@@ -496,26 +643,107 @@ function generateChunk(cx, cz) {
                     const isTall = randHeight > 0.97;
 
                     dummy.position.set(gx * VOXEL_SIZE, VOXEL_SIZE / 2, gz * VOXEL_SIZE);
-                    dummy.updateMatrix();
-                    mesh.setMatrixAt(index, dummy.matrix);
                     
+                    let isCar = false;
                     if (isTall) {
                         mesh.setColorAt(index, BLUE_COLOR);
                     } else {
-                        // Hills are snowy or teal
-                        if (rng() > 0.5) mesh.setColorAt(index, COLORS[3]); // Snow
-                        else mesh.setColorAt(index, COLORS[1]); // Teal
+                        // Hills are snowy (CARS) or teal
+                        if (rng() > 0.5) {
+                            isCar = true;
+                        } else {
+                            mesh.setColorAt(index, COLORS[1]); // Teal
+                        }
                     }
                     
-                    const hillKey = getVoxelKey(gx, 1, gz);
-                    voxelMap.set(hillKey, { mesh, index });
-                    chunkKeys.push(hillKey);
-                    index++;
+                    if (isCar) {
+                        // Random rotation for car
+                        dummy.rotation.y = (Math.floor(rng() * 4) * Math.PI) / 2;
+                        dummy.updateMatrix();
+                        carMesh.setMatrixAt(carIndex, dummy.matrix);
+                        wheelMesh.setMatrixAt(carIndex, dummy.matrix);
+                        glassMesh.setMatrixAt(carIndex, dummy.matrix);
+                        
+                        // Random Car Color
+                        const carColors = [
+                            new THREE.Color(0xBF616A), // Red
+                            new THREE.Color(0xD08770), // Orange
+                            new THREE.Color(0xEBCB8B), // Yellow
+                            new THREE.Color(0xB48EAD), // Purple
+                            new THREE.Color(0xE5E9F0)  // White
+                        ];
+                        const cColor = carColors[Math.floor(rng() * carColors.length)];
+
+                        // 50% Chance to be a moving car
+                        if (rng() < 0.5) {
+                            // Create Entity
+                            // Position: gx, 1, gz is the hill block.
+                            // Car sits on top of it.
+                            // Static car matrix was set at: gx * VOXEL_SIZE, VOXEL_SIZE / 2, gz * VOXEL_SIZE
+                            // Which is y = 2.5.
+                            const carPos = new THREE.Vector3(gx * VOXEL_SIZE, VOXEL_SIZE / 2, gz * VOXEL_SIZE);
+                            createCivilianCar(carPos, cColor);
+                            
+                            // Random rotation
+                            civilians[civilians.length-1].mesh.rotation.y = (Math.floor(rng() * 4) * Math.PI) / 2;
+
+                            // We still need the hill block underneath?
+                            // The static code replaced the hill block with the car?
+                            // Wait, let's check the static code.
+                            // if (isCar) { ... } else { ... mesh.setMatrixAt ... }
+                            // So if it is a car, the "hill" block (green/snow) is NOT placed.
+                            // The car replaces the block.
+                            // But the car is floating at y=2.5?
+                            // If the car moves away, there will be a hole?
+                            // The base ground (y=-2.5) is placed in the loop before this.
+                            // "Base ground ... index++".
+                            // Then "Level 1 ... if (randHeight > 0.94)".
+                            // So there is ground below.
+                            // So if the car moves, it reveals the ground below.
+                            // That is fine.
+                        } else {
+                            // Static Car
+                            dummy.updateMatrix();
+                            carMesh.setMatrixAt(carIndex, dummy.matrix);
+                            wheelMesh.setMatrixAt(carIndex, dummy.matrix);
+                            glassMesh.setMatrixAt(carIndex, dummy.matrix);
+                            
+                            carMesh.setColorAt(carIndex, cColor);
+                            
+                            const hillKey = getVoxelKey(gx, 1, gz);
+                            voxelMap.set(hillKey, { 
+                                mesh: carMesh, 
+                                index: carIndex,
+                                parts: [
+                                    { mesh: wheelMesh, index: carIndex },
+                                    { mesh: glassMesh, index: carIndex }
+                                ]
+                            });
+                            registerInstance(carMesh, carIndex, hillKey);
+                            registerInstance(wheelMesh, carIndex, hillKey);
+                            registerInstance(glassMesh, carIndex, hillKey);
+                            
+                            chunkKeys.push(hillKey);
+                            carIndex++;
+                        }
+                    } else {
+                        dummy.rotation.set(0, 0, 0);
+                        dummy.updateMatrix();
+                        mesh.setMatrixAt(index, dummy.matrix);
+                        
+                        const hillKey = getVoxelKey(gx, 1, gz);
+                        voxelMap.set(hillKey, { mesh, index });
+                        registerInstance(mesh, index, hillKey);
+                        chunkKeys.push(hillKey);
+                        index++;
+                    }
+                    
                     height = VOXEL_SIZE; // Top of hill block
 
                     // Level 2 (Chance: ~3% of total)
                     if (isTall) {
                         dummy.position.set(gx * VOXEL_SIZE, VOXEL_SIZE * 1.5, gz * VOXEL_SIZE);
+                        dummy.rotation.set(0, 0, 0);
                         dummy.updateMatrix();
                         mesh.setMatrixAt(index, dummy.matrix);
                         
@@ -523,6 +751,7 @@ function generateChunk(cx, cz) {
                         
                         const l2Key = getVoxelKey(gx, 2, gz);
                         voxelMap.set(l2Key, { mesh, index });
+                        registerInstance(mesh, index, l2Key);
                         chunkKeys.push(l2Key);
                         index++;
                         height = VOXEL_SIZE * 2;
@@ -537,6 +766,7 @@ function generateChunk(cx, cz) {
                             
                             const l3Key = getVoxelKey(gx, 3, gz);
                             voxelMap.set(l3Key, { mesh, index });
+                            registerInstance(mesh, index, l3Key);
                             chunkKeys.push(l3Key);
                             index++;
                             height = VOXEL_SIZE * 3;
@@ -554,12 +784,14 @@ function generateChunk(cx, cz) {
                 const cloudHeight = 10 + Math.floor(Math.abs(Math.sin(gx * 0.5)) * 3);
                 
                 dummy.position.set(gx * VOXEL_SIZE, cloudHeight * VOXEL_SIZE, gz * VOXEL_SIZE);
+                dummy.rotation.set(0, 0, 0);
                 dummy.updateMatrix();
                 mesh.setMatrixAt(index, dummy.matrix);
                 mesh.setColorAt(index, CLOUD_COLOR);
                 
                 const cloudKey = getVoxelKey(gx, cloudHeight, gz);
                 voxelMap.set(cloudKey, { mesh, index });
+                registerInstance(mesh, index, cloudKey);
                 chunkKeys.push(cloudKey);
                 index++;
             }
@@ -570,6 +802,19 @@ function generateChunk(cx, cz) {
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     worldGroup.add(mesh);
+
+    carMesh.count = carIndex;
+    carMesh.instanceMatrix.needsUpdate = true;
+    if (carMesh.instanceColor) carMesh.instanceColor.needsUpdate = true;
+    worldGroup.add(carMesh);
+
+    wheelMesh.count = carIndex;
+    wheelMesh.instanceMatrix.needsUpdate = true;
+    worldGroup.add(wheelMesh);
+
+    glassMesh.count = carIndex;
+    glassMesh.instanceMatrix.needsUpdate = true;
+    worldGroup.add(glassMesh);
     
     // Spawn Enemy (20% chance per chunk, but not at 0,0)
     if ((cx !== 0 || cz !== 0) && rng() > 0.8) {
@@ -587,7 +832,7 @@ function generateChunk(cx, cz) {
         }
     }
 
-    return { mesh, keys: chunkKeys };
+    return { meshes: [mesh, carMesh, wheelMesh, glassMesh], keys: chunkKeys };
 }
 
 let lastChunkX = null;
@@ -618,9 +863,20 @@ function updateChunks() {
     // Cleanup far chunks
     for (const [key, chunk] of chunks) {
         if (!activeKeys.has(key)) {
-            worldGroup.remove(chunk.mesh);
-            chunk.mesh.dispose();
-            chunk.keys.forEach(k => voxelMap.delete(k));
+            chunk.meshes.forEach(m => {
+                worldGroup.remove(m);
+                m.dispose();
+            });
+            chunk.keys.forEach(k => {
+                const data = voxelMap.get(k);
+                if (data) {
+                    unregisterInstance(data.mesh, data.index);
+                    if (data.parts) {
+                        data.parts.forEach(p => unregisterInstance(p.mesh, p.index));
+                    }
+                }
+                voxelMap.delete(k);
+            });
             chunks.delete(key);
         }
     }
@@ -668,12 +924,14 @@ function attemptPush(pos, direction) {
         const key = getVoxelKey(gx, gy, gz);
         
         if (voxelMap.has(key)) {
-            const { mesh, index } = voxelMap.get(key);
+            const { mesh, index, parts } = voxelMap.get(key);
             const color = new THREE.Color();
-            mesh.getColorAt(index, color);
+            if (mesh.instanceColor) mesh.getColorAt(index, color);
             
             // Check if Snow (Nord5) - Light colored
-            if (color.getHex() === COLORS[3].getHex()) {
+            // Or if it's a car (check geometry type or just assume cars are pushable)
+            
+            if (mesh.geometry === carGeometry) {
                 // Determine push direction (snap to axis)
                 const pushX = Math.abs(direction.x) > Math.abs(direction.z) ? Math.sign(direction.x) : 0;
                 const pushZ = Math.abs(direction.z) >= Math.abs(direction.x) ? Math.sign(direction.z) : 0;
@@ -699,13 +957,38 @@ function attemptPush(pos, direction) {
                         const newPos = new THREE.Vector3(nextGx * VOXEL_SIZE, (gy * VOXEL_SIZE) - (VOXEL_SIZE/2), nextGz * VOXEL_SIZE);
                         
                         dummy.position.copy(newPos);
+                        // Keep rotation
+                        const rot = new THREE.Quaternion();
+                        const pos = new THREE.Vector3();
+                        const scale = new THREE.Vector3();
+                        matrix.decompose(pos, rot, scale);
+                        dummy.quaternion.copy(rot);
+                        dummy.scale.copy(scale);
+
                         dummy.updateMatrix();
                         mesh.setMatrixAt(index, dummy.matrix);
                         mesh.instanceMatrix.needsUpdate = true;
+
+                        if (parts) {
+                            parts.forEach(p => {
+                                p.mesh.setMatrixAt(p.index, dummy.matrix);
+                                p.mesh.instanceMatrix.needsUpdate = true;
+                            });
+                        }
                         
                         voxelMap.delete(key);
-                        voxelMap.set(nextKey, { mesh, index });
+                        voxelMap.set(nextKey, { mesh, index, parts });
                         
+                        // Update Lookup
+                        unregisterInstance(mesh, index);
+                        registerInstance(mesh, index, nextKey);
+                        if (parts) {
+                            parts.forEach(p => {
+                                unregisterInstance(p.mesh, p.index);
+                                registerInstance(p.mesh, p.index, nextKey);
+                            });
+                        }
+
                         updateHeightMap(gx, gz);
                         updateHeightMap(nextGx, nextGz);
                         
@@ -719,11 +1002,12 @@ function attemptPush(pos, direction) {
 }
 
 function checkEnvironmentCollision(pos, quat) {
+    // Tighter collision box for cars (approx 4.5 x 3.2)
     const points = [
-        new THREE.Vector3(2, 1, 3), new THREE.Vector3(-2, 1, 3),
-        new THREE.Vector3(2, 1, -3), new THREE.Vector3(-2, 1, -3),
-        new THREE.Vector3(2, 1, 0), new THREE.Vector3(-2, 1, 0),
-        new THREE.Vector3(0, 1, 3), new THREE.Vector3(0, 1, -3)
+        new THREE.Vector3(2.2, 1, 1.5), new THREE.Vector3(-2.2, 1, 1.5),
+        new THREE.Vector3(2.2, 1, -1.5), new THREE.Vector3(-2.2, 1, -1.5),
+        new THREE.Vector3(2.2, 1, 0), new THREE.Vector3(-2.2, 1, 0),
+        new THREE.Vector3(0, 1, 1.5), new THREE.Vector3(0, 1, -1.5)
     ];
     
     for (const p of points) {
@@ -737,8 +1021,8 @@ function checkEnvironmentCollision(pos, quat) {
 }
 
 function resolveEntityCollisions() {
-    const units = [tank, ...enemies];
-    const radius = 3.5; 
+    const units = [tank, ...enemies, ...civilians];
+    const radius = 2.5; 
 
     for (let i = 0; i < units.length; i++) {
         for (let j = i + 1; j < units.length; j++) {
@@ -996,7 +1280,11 @@ function restartGame() {
     enemies.forEach(e => scene.remove(e.mesh));
     enemies.length = 0;
 
-    spawnReinforcements(5);
+    // Clear Civilians
+    civilians.forEach(c => scene.remove(c.mesh));
+    civilians.length = 0;
+
+    spawnReinforcements(10);
     lastPeriodicSpawnTime = clock.getElapsedTime();
 
     // Clear Projectiles
@@ -1380,6 +1668,126 @@ function spawnReinforcements(count = 2) {
     }
 }
 
+// --- Camera Occlusion ---
+const cameraRaycaster = new THREE.Raycaster();
+const fadedObjects = new Map(); // Key: voxelKey, Value: { restoreOps: [], tempMeshes: [] }
+
+function updateCameraOcclusion() {
+    const tankPos = tank.mesh.position.clone().add(new THREE.Vector3(0, 2, 0));
+    const camPos = camera.position;
+    const dir = tankPos.clone().sub(camPos).normalize();
+    const dist = tankPos.distanceTo(camPos);
+
+    cameraRaycaster.set(camPos, dir);
+    
+    const activeKeys = new Set();
+
+    // Helper to fade a voxel
+    const fadeVoxel = (key) => {
+        if (!voxelMap.has(key)) return;
+        activeKeys.add(key);
+
+        if (!fadedObjects.has(key)) {
+            const data = voxelMap.get(key);
+            const restoreOps = [];
+            const tempMeshes = [];
+
+            const processPart = (mesh, index) => {
+                const matrix = new THREE.Matrix4();
+                mesh.getMatrixAt(index, matrix);
+                
+                // Store restore op
+                const originalMatrix = matrix.clone();
+                restoreOps.push(() => {
+                    mesh.setMatrixAt(index, originalMatrix);
+                    mesh.instanceMatrix.needsUpdate = true;
+                });
+
+                // Hide instance
+                const hiddenMatrix = matrix.clone().scale(new THREE.Vector3(0,0,0));
+                mesh.setMatrixAt(index, hiddenMatrix);
+                mesh.instanceMatrix.needsUpdate = true;
+
+                // Create transparent clone
+                const mat = mesh.material.clone();
+                mat.transparent = true;
+                mat.opacity = 0.2;
+                
+                if (mesh.instanceColor) {
+                     const color = new THREE.Color();
+                     mesh.getColorAt(index, color);
+                     mat.color.multiply(color);
+                }
+                
+                const tempMesh = new THREE.Mesh(mesh.geometry, mat);
+                const pos = new THREE.Vector3();
+                const quat = new THREE.Quaternion();
+                const scale = new THREE.Vector3();
+                originalMatrix.decompose(pos, quat, scale);
+                
+                tempMesh.position.copy(pos);
+                tempMesh.quaternion.copy(quat);
+                tempMesh.scale.copy(scale);
+                
+                tempMesh.userData = { voxelKey: key };
+                
+                scene.add(tempMesh);
+                tempMeshes.push(tempMesh);
+            };
+
+            processPart(data.mesh, data.index);
+            if (data.parts) {
+                data.parts.forEach(p => processPart(p.mesh, p.index));
+            }
+
+            fadedObjects.set(key, { restoreOps, tempMeshes });
+        }
+    };
+
+    // Check hits
+    const tempMeshes = [];
+    fadedObjects.forEach(data => tempMeshes.push(...data.tempMeshes));
+    
+    const objectsToTest = [...worldGroup.children, ...tempMeshes];
+    const hits = cameraRaycaster.intersectObjects(objectsToTest);
+
+    for (const hit of hits) {
+        if (hit.distance > dist - 2) break; // Don't fade if close to tank
+
+        let key;
+        if (hit.object.userData.voxelKey) {
+            key = hit.object.userData.voxelKey;
+        } else if (hit.instanceId !== undefined) {
+            // Use lookup
+            const map = instanceLookup.get(hit.object.uuid);
+            if (map && map.has(hit.instanceId)) {
+                key = map.get(hit.instanceId);
+            }
+        }
+
+        if (key) fadeVoxel(key);
+    }
+
+    // Check camera position (in case we are inside a block)
+    const camGx = Math.round(camPos.x / VOXEL_SIZE);
+    const camGy = Math.round((camPos.y + VOXEL_SIZE/2) / VOXEL_SIZE);
+    const camGz = Math.round(camPos.z / VOXEL_SIZE);
+    const camKey = getVoxelKey(camGx, camGy, camGz);
+    fadeVoxel(camKey);
+
+    // Restore objects
+    for (const [key, data] of fadedObjects) {
+        if (!activeKeys.has(key)) {
+            data.restoreOps.forEach(op => op());
+            data.tempMeshes.forEach(m => {
+                scene.remove(m);
+                m.material.dispose();
+            });
+            fadedObjects.delete(key);
+        }
+    }
+}
+
 // --- Game Loop ---
 const clock = new THREE.Clock();
 let lastPeriodicSpawnTime = 0;
@@ -1392,11 +1800,6 @@ function animate() {
     if (isPaused) return;
 
     const now = clock.getElapsedTime();
-
-    if (now - lastPeriodicSpawnTime > 20) {
-        spawnReinforcements(1);
-        lastPeriodicSpawnTime = now;
-    }
     
     // Update Indicator (Barrel Color)
     if (now - lastFireTime >= FIRE_COOLDOWN) {
@@ -1429,6 +1832,7 @@ function animate() {
     }
 
     updateChunks();
+    updateCameraOcclusion();
     updateRadar();
     updateParticles(delta);
     updateExhaust(delta);
@@ -1451,6 +1855,51 @@ function animate() {
 
     resolveEntityCollisions();
 
+    // Cleanup Far Entities
+    const cleanupDist = (DRAW_DISTANCE + 5) * CHUNK_SIZE;
+    // Enemies persist (no cleanup)
+    
+    for (let i = civilians.length - 1; i >= 0; i--) {
+        if (civilians[i].mesh.position.distanceTo(tank.mesh.position) > cleanupDist) {
+            scene.remove(civilians[i].mesh);
+            civilians.splice(i, 1);
+        }
+    }
+
+    // Civilian Logic
+    civilians.forEach(civ => {
+        const moveAmount = civ.speed * delta;
+        const direction = new THREE.Vector3(1, 0, 0); // Car model faces +X
+        direction.applyQuaternion(civ.mesh.quaternion);
+        
+        const targetPos = civ.mesh.position.clone().addScaledVector(direction, moveAmount);
+        
+        // Check collision
+        if (!checkEnvironmentCollision(targetPos, civ.mesh.quaternion)) {
+            civ.mesh.position.copy(targetPos);
+        } else {
+            // Blocked: Change direction or reverse
+            if (Math.random() < 0.5) {
+                // Reverse (180 degrees)
+                civ.mesh.rotateY(Math.PI);
+            } else {
+                // Turn 90 degrees (Left or Right)
+                const dir = Math.random() < 0.5 ? 1 : -1;
+                civ.mesh.rotateY(dir * Math.PI / 2);
+            }
+        }
+        
+        // Gravity
+        const h = getTerrainHeight(civ.mesh.position.x, civ.mesh.position.z);
+        if (h > -50) {
+            // Match static car height (approx 2.5 above ground level 0)
+            // If h is 0, y should be 2.5.
+            civ.mesh.position.y = THREE.MathUtils.lerp(civ.mesh.position.y, h + 2.5, 0.1);
+        } else {
+            civ.mesh.position.y -= 9.8 * delta;
+        }
+    });
+
     // Enemy Logic
     enemies.forEach(enemy => {
         const toPlayer = tank.mesh.position.clone().sub(enemy.mesh.position);
@@ -1460,7 +1909,10 @@ function animate() {
         let moveAmount = 0;
         let rotationAmount = 0;
 
-        if (dist < 80 && dist > 6) { // Chase if close enough but not touching
+        // Activity Cycle: 3s Active, 1s Idle (75% Active)
+        const isActive = ((now + (enemy.offset || 0)) % 4) < 3;
+
+        if (isActive && dist < 150 && dist > 6) { // Increased range to 150
             toPlayer.normalize();
             
             // Calculate angle to player
@@ -1474,54 +1926,58 @@ function animate() {
             while (diff > Math.PI) diff -= Math.PI * 2;
             while (diff < -Math.PI) diff += Math.PI * 2;
             
-            // Only engage if player is in front (within ~60 degrees)
-            if (Math.abs(diff) < 1.0) {
-                // Turn
-                if (Math.abs(diff) > 0.1) {
-                    rotationAmount = Math.sign(diff) * TANK_ROTATION_SPEED * delta;
-                    if (Math.abs(rotationAmount) > Math.abs(diff)) rotationAmount = diff;
-                    enemy.mesh.rotateY(rotationAmount);
-                }
+            // Check Blind Spot
+            // If hasBlindSpot is true, only engage if player is within ~60 degrees (approx 1.0 radian)
+            let canSee = true;
+            if (enemy.hasBlindSpot && Math.abs(diff) > 1.0) {
+                canSee = false;
+            }
 
-                // Flash if aiming at player
-                if (Math.abs(diff) < 0.3) {
-                    const flash = (Math.sin(now * 20) + 1) / 2;
-                    enemy.turretMat.emissive.setHex(0xD08770); // Nord12 (Orange - closer to Red)
-                    enemy.turretMat.emissiveIntensity = flash * 0.5;
-                } else {
-                    enemy.turretMat.emissiveIntensity = 0;
-                }
-                
-                // Move if roughly facing
-                if (Math.abs(diff) < 0.2) {
-                    moveAmount = ENEMY_SPEED * delta;
-                    const direction = new THREE.Vector3(0, 0, -1);
-                    direction.applyQuaternion(enemy.mesh.quaternion);
-                    
-                    const targetPos = enemy.mesh.position.clone().addScaledVector(direction, moveAmount);
-                    if (!checkEnvironmentCollision(targetPos, enemy.mesh.quaternion)) {
-                        enemy.mesh.position.copy(targetPos);
-                    }
+            // Always turn towards player if seen
+            if (canSee && Math.abs(diff) > 0.1) {
+                rotationAmount = Math.sign(diff) * TANK_ROTATION_SPEED * delta;
+                if (Math.abs(rotationAmount) > Math.abs(diff)) rotationAmount = diff;
+                enemy.mesh.rotateY(rotationAmount);
+            }
 
-                    // Shoot if facing player
-                    if (Math.abs(diff) < 0.1) {
-                        enemyShoot(enemy);
-                    }
-
-                    // Exhaust
-                    if (Math.random() > 0.8) {
-                        const offset = new THREE.Vector3(1.4, 3.8, 2.2);
-                        offset.applyMatrix4(enemy.innerMesh.matrixWorld);
-                        createExhaust(offset);
-                        
-                        const offset2 = new THREE.Vector3(-1.4, 3.8, 2.2);
-                        offset2.applyMatrix4(enemy.innerMesh.matrixWorld);
-                        createExhaust(offset2);
-                    }
-                }
+            // Flash if aiming at player
+            if (canSee && Math.abs(diff) < 0.3) {
+                const flash = (Math.sin(now * 20) + 1) / 2;
+                enemy.turretMat.emissive.setHex(0xD08770); // Nord12 (Orange - closer to Red)
+                enemy.turretMat.emissiveIntensity = flash * 0.5;
             } else {
                 enemy.turretMat.emissiveIntensity = 0;
             }
+            
+            // Move if roughly facing (widened angle slightly)
+            if (canSee && Math.abs(diff) < 0.5) {
+                moveAmount = ENEMY_SPEED * delta;
+                const direction = new THREE.Vector3(0, 0, -1);
+                direction.applyQuaternion(enemy.mesh.quaternion);
+                
+                const targetPos = enemy.mesh.position.clone().addScaledVector(direction, moveAmount);
+                if (!checkEnvironmentCollision(targetPos, enemy.mesh.quaternion)) {
+                    enemy.mesh.position.copy(targetPos);
+                }
+
+                // Shoot if facing player
+                if (Math.abs(diff) < 0.1) {
+                    enemyShoot(enemy);
+                }
+
+                // Exhaust
+                if (Math.random() > 0.8) {
+                    const offset = new THREE.Vector3(1.4, 3.8, 2.2);
+                    offset.applyMatrix4(enemy.innerMesh.matrixWorld);
+                    createExhaust(offset);
+                    
+                    const offset2 = new THREE.Vector3(-1.4, 3.8, 2.2);
+                    offset2.applyMatrix4(enemy.innerMesh.matrixWorld);
+                    createExhaust(offset2);
+                }
+            }
+        } else {
+            enemy.turretMat.emissiveIntensity = 0;
         }
         
         // Animate Tracks
@@ -1667,11 +2123,11 @@ function animate() {
         const key = getVoxelKey(gx, gy, gz);
 
         if (voxelMap.has(key)) {
-            const { mesh, index } = voxelMap.get(key);
+            const { mesh, index, parts } = voxelMap.get(key);
             
             // Explosion Effect
             const color = new THREE.Color();
-            mesh.getColorAt(index, color);
+            if (mesh.instanceColor) mesh.getColorAt(index, color);
 
             if (color.getHex() === BLUE_COLOR.getHex()) {
                 createRicochet(p.position, p.userData.velocity);
@@ -1695,7 +2151,18 @@ function animate() {
             mesh.setMatrixAt(index, matrix);
             mesh.instanceMatrix.needsUpdate = true;
 
+            if (parts) {
+                parts.forEach(p => {
+                    p.mesh.setMatrixAt(p.index, matrix);
+                    p.mesh.instanceMatrix.needsUpdate = true;
+                });
+            }
+
             // Remove from map and update height
+            unregisterInstance(mesh, index);
+            if (parts) {
+                parts.forEach(p => unregisterInstance(p.mesh, p.index));
+            }
             voxelMap.delete(key);
             updateHeightMap(gx, gz);
 
@@ -1715,6 +2182,7 @@ function animate() {
         // Check Enemy Collision
         let hitEnemy = false;
         if (p.userData.owner === 'player') {
+            // Check Enemies
             for (let j = enemies.length - 1; j >= 0; j--) {
                 const enemy = enemies[j];
                 if (p.position.distanceTo(enemy.mesh.position) < 4) {
@@ -1741,12 +2209,39 @@ function animate() {
                     }
 
                     updateKillCountDisplay();
-                    spawnReinforcements();
+                    spawnReinforcements(2);
 
                     scene.remove(p);
                     projectiles.splice(i, 1);
                     hitEnemy = true;
                     break;
+                }
+            }
+            // Check Civilians
+            if (!hitEnemy) {
+                for (let j = civilians.length - 1; j >= 0; j--) {
+                    const civ = civilians[j];
+                    if (p.position.distanceTo(civ.mesh.position) < 4) {
+                        createExplosion(civ.mesh.position, civ.color);
+                        
+                        // Death Smoke
+                        for (let k = 0; k < 15; k++) {
+                            const smokePos = civ.mesh.position.clone().add(new THREE.Vector3(
+                                (Math.random() - 0.5) * 4,
+                                Math.random() * 3,
+                                (Math.random() - 0.5) * 4
+                            ));
+                            createExhaust(smokePos);
+                        }
+
+                        scene.remove(civ.mesh);
+                        civilians.splice(j, 1);
+                        
+                        scene.remove(p);
+                        projectiles.splice(i, 1);
+                        hitEnemy = true;
+                        break;
+                    }
                 }
             }
         } else if (p.userData.owner === 'enemy') {
@@ -1770,7 +2265,11 @@ function animate() {
     
     // Smooth camera movement
     camera.position.lerp(cameraOffset, 0.1);
-    camera.lookAt(tank.mesh.position);
+    
+    // Look ahead of the tank so the tank is lower on screen
+    const camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(tank.mesh.quaternion);
+    const lookTarget = tank.mesh.position.clone().add(camForward.multiplyScalar(20));
+    camera.lookAt(lookTarget);
 
     renderer.render(scene, camera);
 }
@@ -1783,6 +2282,6 @@ window.addEventListener('resize', () => {
 });
 
 updateChunks();
-spawnReinforcements(5);
+spawnReinforcements(10);
 
 animate();
