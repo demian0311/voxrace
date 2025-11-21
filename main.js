@@ -8,6 +8,7 @@ const TANK_SPEED = 30;
 const ENEMY_SPEED = 4;
 const TANK_ROTATION_SPEED = 2;
 const PROJECTILE_SPEED = 30;
+const PLAYER_PROJECTILE_SPEED = 45;
 const FIRE_COOLDOWN = 2.0; // Seconds
 const ENEMY_FIRE_COOLDOWN = 5.0;
 const RADAR_RANGE = 150;
@@ -725,10 +726,32 @@ function generateChunk(cx, cz) {
     const startX = cx * CHUNK_SIZE;
     const startZ = cz * CHUNK_SIZE;
     
+    // Town Logic:
+    // Global Road Grid: Every 8th chunk is a "Highway" (More sparse)
+    const isRoadX = (Math.abs(cx) % 8 === 0);
+    const isRoadZ = (Math.abs(cz) % 8 === 0);
+    const isIntersection = isRoadX && isRoadZ;
+    
+    // Towns appear along roads, especially at intersections
+    // Intersection: 100% Town
+    // Road: 40% Town
+    // Wilderness: 1% Town (Isolated)
+    let isTown = false;
+    if (isIntersection) isTown = true;
+    else if (isRoadX || isRoadZ) isTown = rng() < 0.4;
+    else isTown = rng() < 0.01;
+
     for (let x = 0; x < CHUNK_SIZE; x++) {
         for (let z = 0; z < CHUNK_SIZE; z++) {
             const gx = startX + x;
             const gz = startZ + z;
+            
+            // Determine if this specific voxel is part of the road network
+            // Roads are 4 voxels wide (x/z = 3,4,5,6)
+            let isStreetVoxel = false;
+            
+            if (isRoadX && x >= 3 && x <= 6) isStreetVoxel = true;
+            if (isRoadZ && z >= 3 && z <= 6) isStreetVoxel = true;
             
             // Base ground
             dummy.position.set(gx * VOXEL_SIZE, -VOXEL_SIZE / 2, gz * VOXEL_SIZE);
@@ -736,11 +759,19 @@ function generateChunk(cx, cz) {
             dummy.updateMatrix();
             mesh.setMatrixAt(index, dummy.matrix);
             
-            // Randomize base color (mostly green, some teal/dirt)
-            const rand = rng();
-            if (rand > 0.95) mesh.setColorAt(index, COLORS[2]); // Dirt
-            else if (rand > 0.8) mesh.setColorAt(index, COLORS[1]); // Teal
-            else mesh.setColorAt(index, COLORS[0]); // Green
+            if (isStreetVoxel) {
+                // Paved Road (Dark Grey)
+                mesh.setColorAt(index, COLORS[2]);
+            } else if (isTown) {
+                // Town Base: Pavement (Dark Grey)
+                mesh.setColorAt(index, COLORS[2]);
+            } else {
+                // Nature Base: Randomize base color (mostly green, some teal/dirt)
+                const rand = rng();
+                if (rand > 0.95) mesh.setColorAt(index, COLORS[2]); // Dirt
+                else if (rand > 0.8) mesh.setColorAt(index, COLORS[1]); // Teal
+                else mesh.setColorAt(index, COLORS[0]); // Green
+            }
             
             const baseKey = getVoxelKey(gx, 0, gz);
             voxelMap.set(baseKey, { mesh, index });
@@ -750,104 +781,93 @@ function generateChunk(cx, cz) {
             
             let height = 0; // Top of base block
 
-            // Random hills
-            // Keep center 3x3 flat for spawn
-            if ((Math.abs(gx) > 1 || Math.abs(gz) > 1)) {
-                const randHeight = rng();
+            if (isStreetVoxel) {
+                // Street - Flat, no buildings
+                // Chance for car
+                if (rng() < 0.05) {
+                     const cColor = new THREE.Color(0xE5E9F0); // White car
+                     const carPos = new THREE.Vector3(gx * VOXEL_SIZE, 1.4, gz * VOXEL_SIZE);
+                     createCivilianCar(carPos, cColor);
+                     
+                     // Align car with street
+                     // If intersection, random. Else align with road.
+                     if (isRoadX && isRoadZ) {
+                         const inVert = (x >= 3 && x <= 6);
+                         const inHoriz = (z >= 3 && z <= 6);
+                         
+                         if (inVert && inHoriz) {
+                             // Center: Random
+                             civilians[civilians.length-1].mesh.rotation.y = (Math.floor(rng() * 4) * Math.PI) / 2;
+                         } else if (inVert) {
+                             // Vertical arm (Road along Z) -> Face Z (PI/2 or -PI/2)
+                             civilians[civilians.length-1].mesh.rotation.y = (rng() > 0.5) ? Math.PI / 2 : -Math.PI / 2;
+                         } else {
+                             // Horizontal arm (Road along X) -> Face X (0 or PI)
+                             civilians[civilians.length-1].mesh.rotation.y = (rng() > 0.5) ? 0 : Math.PI;
+                         }
+                     } else if (isRoadX) {
+                         // Road runs along Z axis (North/South)
+                         // Car should face Z (PI/2 or -PI/2)
+                         civilians[civilians.length-1].mesh.rotation.y = (rng() > 0.5) ? Math.PI / 2 : -Math.PI / 2;
+                     } else {
+                         // Road runs along X axis (East/West)
+                         // Car should face X (0 or PI)
+                         civilians[civilians.length-1].mesh.rotation.y = (rng() > 0.5) ? 0 : Math.PI;
+                     }
+                }
+            } else if (isTown) {
+                // Town Generation (Non-Street areas)
                 
-                // Level 1 (Chance: ~6%)
-                if (randHeight > 0.94) {
-                    const isTall = randHeight > 0.97;
+                // 30% chance for an empty lot (park/parking)
+                if (rng() > 0.3) {
+                    // Building Lot
+                    // Random height 1-4
+                    const buildingHeight = Math.floor(rng() * 4) + 1;
+                    const bColor = [
+                        new THREE.Color(0xBF616A), // Red
+                        new THREE.Color(0xD08770), // Orange
+                        new THREE.Color(0xEBCB8B), // Yellow
+                        new THREE.Color(0x5E81AC), // Blue
+                        new THREE.Color(0xB48EAD)  // Purple
+                    ][Math.floor(rng() * 5)];
 
-                    dummy.position.set(gx * VOXEL_SIZE, VOXEL_SIZE / 2, gz * VOXEL_SIZE);
-                    
-                    let isCar = false;
-                    if (isTall) {
-                        mesh.setColorAt(index, BLUE_COLOR);
-                    } else {
-                        // Hills are snowy (CARS) or teal
-                        // Increased car chance to 80%
-                        if (rng() > 0.2) {
-                            isCar = true;
-                        } else {
-                            mesh.setColorAt(index, COLORS[1]); // Teal
-                        }
-                    }
-                    
-                    if (isCar) {
-                        // Lower car to sit on ground
-                        dummy.position.y = 1.4;
-
-                        // Random rotation for car
-                        dummy.rotation.y = (Math.floor(rng() * 4) * Math.PI) / 2;
+                    for (let h = 1; h <= buildingHeight; h++) {
+                        dummy.position.set(gx * VOXEL_SIZE, (h * VOXEL_SIZE) - (VOXEL_SIZE/2), gz * VOXEL_SIZE);
                         dummy.updateMatrix();
-                        carMesh.setMatrixAt(carIndex, dummy.matrix);
-                        wheelMesh.setMatrixAt(carIndex, dummy.matrix);
-                        glassMesh.setMatrixAt(carIndex, dummy.matrix);
+                        mesh.setMatrixAt(index, dummy.matrix);
+                        mesh.setColorAt(index, bColor);
                         
-                        // Random Car Color
-                        const carColors = [
-                            new THREE.Color(0xBF616A), // Red
-                            new THREE.Color(0xD08770), // Orange
-                            new THREE.Color(0xEBCB8B), // Yellow
-                            new THREE.Color(0xB48EAD), // Purple
-                            new THREE.Color(0xE5E9F0)  // White
-                        ];
-                        const cColor = carColors[Math.floor(rng() * carColors.length)];
+                        const bKey = getVoxelKey(gx, h, gz);
+                        voxelMap.set(bKey, { mesh, index });
+                        registerInstance(mesh, index, bKey);
+                        chunkKeys.push(bKey);
+                        index++;
+                    }
+                    height = buildingHeight * VOXEL_SIZE;
+                }
+            } else {
+                // Random hills (Nature)
+                // Keep center 3x3 flat for spawn
+                if ((Math.abs(gx) > 1 || Math.abs(gz) > 1)) {
+                    const randHeight = rng();
+                    
+                    // Level 1 (Chance: ~2%)
+                    if (randHeight > 0.98) {
+                        const isTall = randHeight > 0.99;
 
-                        // 80% Chance to be a moving car
-                        if (rng() < 0.8) {
-                            // Create Entity
-                            // Position: gx, 1, gz is the hill block.
-                            // Car sits on top of it.
-                            // Static car matrix was set at: gx * VOXEL_SIZE, VOXEL_SIZE / 2, gz * VOXEL_SIZE
-                            // Which is y = 2.5.
-                            const carPos = new THREE.Vector3(gx * VOXEL_SIZE, 1.4, gz * VOXEL_SIZE);
-                            createCivilianCar(carPos, cColor);
-                            
-                            // Random rotation
-                            civilians[civilians.length-1].mesh.rotation.y = (Math.floor(rng() * 4) * Math.PI) / 2;
-
-                            // We still need the hill block underneath?
-                            // The static code replaced the hill block with the car?
-                            // Wait, let's check the static code.
-                            // if (isCar) { ... } else { ... mesh.setMatrixAt ... }
-                            // So if it is a car, the "hill" block (green/snow) is NOT placed.
-                            // The car replaces the block.
-                            // But the car is floating at y=2.5?
-                            // If the car moves away, there will be a hole?
-                            // The base ground (y=-2.5) is placed in the loop before this.
-                            // "Base ground ... index++".
-                            // Then "Level 1 ... if (randHeight > 0.94)".
-                            // So there is ground below.
-                            // So if the car moves, it reveals the ground below.
-                            // That is fine.
+                        dummy.position.set(gx * VOXEL_SIZE, VOXEL_SIZE / 2, gz * VOXEL_SIZE);
+                        
+                        if (isTall) {
+                            mesh.setColorAt(index, BLUE_COLOR);
                         } else {
-                            // Static Car
-                            dummy.updateMatrix();
-                            carMesh.setMatrixAt(carIndex, dummy.matrix);
-                            wheelMesh.setMatrixAt(carIndex, dummy.matrix);
-                            glassMesh.setMatrixAt(carIndex, dummy.matrix);
-                            
-                            carMesh.setColorAt(carIndex, cColor);
-                            
-                            const hillKey = getVoxelKey(gx, 1, gz);
-                            voxelMap.set(hillKey, { 
-                                mesh: carMesh, 
-                                index: carIndex,
-                                parts: [
-                                    { mesh: wheelMesh, index: carIndex },
-                                    { mesh: glassMesh, index: carIndex }
-                                ]
-                            });
-                            registerInstance(carMesh, carIndex, hillKey);
-                            registerInstance(wheelMesh, carIndex, hillKey);
-                            registerInstance(glassMesh, carIndex, hillKey);
-                            
-                            chunkKeys.push(hillKey);
-                            carIndex++;
+                            // Hills are snowy or teal
+                            if (rng() > 0.5) {
+                                mesh.setColorAt(index, COLORS[3]); // Snow (Nord5)
+                            } else {
+                                mesh.setColorAt(index, COLORS[1]); // Teal
+                            }
                         }
-                    } else {
+                        
                         dummy.rotation.set(0, 0, 0);
                         dummy.updateMatrix();
                         mesh.setMatrixAt(index, dummy.matrix);
@@ -857,40 +877,40 @@ function generateChunk(cx, cz) {
                         registerInstance(mesh, index, hillKey);
                         chunkKeys.push(hillKey);
                         index++;
-                    }
-                    
-                    height = VOXEL_SIZE; // Top of hill block
-
-                    // Level 2 (Chance: ~3% of total)
-                    if (isTall) {
-                        dummy.position.set(gx * VOXEL_SIZE, VOXEL_SIZE * 1.5, gz * VOXEL_SIZE);
-                        dummy.rotation.set(0, 0, 0);
-                        dummy.updateMatrix();
-                        mesh.setMatrixAt(index, dummy.matrix);
                         
-                        mesh.setColorAt(index, BLUE_COLOR);
-                        
-                        const l2Key = getVoxelKey(gx, 2, gz);
-                        voxelMap.set(l2Key, { mesh, index });
-                        registerInstance(mesh, index, l2Key);
-                        chunkKeys.push(l2Key);
-                        index++;
-                        height = VOXEL_SIZE * 2;
+                        height = VOXEL_SIZE; // Top of hill block
 
-                        // Level 3 (Chance: 10% of Level 2)
-                        if (rng() > 0.9) {
-                            dummy.position.set(gx * VOXEL_SIZE, VOXEL_SIZE * 2.5, gz * VOXEL_SIZE);
+                        // Level 2 (Chance: ~3% of total)
+                        if (isTall) {
+                            dummy.position.set(gx * VOXEL_SIZE, VOXEL_SIZE * 1.5, gz * VOXEL_SIZE);
+                            dummy.rotation.set(0, 0, 0);
                             dummy.updateMatrix();
                             mesh.setMatrixAt(index, dummy.matrix);
                             
                             mesh.setColorAt(index, BLUE_COLOR);
                             
-                            const l3Key = getVoxelKey(gx, 3, gz);
-                            voxelMap.set(l3Key, { mesh, index });
-                            registerInstance(mesh, index, l3Key);
-                            chunkKeys.push(l3Key);
+                            const l2Key = getVoxelKey(gx, 2, gz);
+                            voxelMap.set(l2Key, { mesh, index });
+                            registerInstance(mesh, index, l2Key);
+                            chunkKeys.push(l2Key);
                             index++;
-                            height = VOXEL_SIZE * 3;
+                            height = VOXEL_SIZE * 2;
+
+                            // Level 3 (Chance: 10% of Level 2)
+                            if (rng() > 0.9) {
+                                dummy.position.set(gx * VOXEL_SIZE, VOXEL_SIZE * 2.5, gz * VOXEL_SIZE);
+                                dummy.updateMatrix();
+                                mesh.setMatrixAt(index, dummy.matrix);
+                                
+                                mesh.setColorAt(index, BLUE_COLOR);
+                                
+                                const l3Key = getVoxelKey(gx, 3, gz);
+                                voxelMap.set(l3Key, { mesh, index });
+                                registerInstance(mesh, index, l3Key);
+                                chunkKeys.push(l3Key);
+                                index++;
+                                height = VOXEL_SIZE * 3;
+                            }
                         }
                     }
                 }
@@ -1330,7 +1350,7 @@ function createTank() {
 
 const tank = createTank();
 scene.add(tank.mesh);
-tank.mesh.position.set(0, 0, 0); // Start at center, which is now guaranteed flat
+tank.mesh.position.set(25, 0, 25); // Start at center of chunk (0,0), which is a road intersection
 
 let recoilVelocity = new THREE.Vector3();
 
@@ -1367,7 +1387,7 @@ function shoot() {
     const direction = new THREE.Vector3(0, 0, -1);
     direction.applyQuaternion(tank.turret.getWorldQuaternion(new THREE.Quaternion()));
     
-    projectile.userData.velocity = direction.multiplyScalar(PROJECTILE_SPEED);
+    projectile.userData.velocity = direction.multiplyScalar(PLAYER_PROJECTILE_SPEED);
     projectile.userData.owner = 'player'; // Tag as player projectile
     
     scene.add(projectile);
@@ -1406,7 +1426,7 @@ function restartGame() {
 
     // Reset Tank
     tank.health = MAX_HEALTH;
-    tank.mesh.position.set(0, 0, 0);
+    tank.mesh.position.set(25, 0, 25); // Start at center of chunk (0,0), which is a road intersection
     tank.mesh.rotation.set(0, 0, 0);
     tank.innerMesh.rotation.set(0, 0, 0);
     tank.currentSpeed = 0;
@@ -2051,15 +2071,9 @@ function animate() {
         if (!checkEnvironmentCollision(targetPos, civ.mesh.quaternion)) {
             civ.mesh.position.copy(targetPos);
         } else {
-            // Blocked: Change direction or reverse
-            if (Math.random() < 0.5) {
-                // Reverse (180 degrees)
-                civ.mesh.rotateY(Math.PI);
-            } else {
-                // Turn 90 degrees (Left or Right)
-                const dir = Math.random() < 0.5 ? 1 : -1;
-                civ.mesh.rotateY(dir * Math.PI / 2);
-            }
+            // Blocked: Reverse direction (180 degrees)
+            // Cars on roads should just go back and forth, not turn 90 degrees into buildings
+            civ.mesh.rotateY(Math.PI);
         }
         
         // Gravity
@@ -2179,7 +2193,7 @@ function animate() {
     // Tank Movement
     const moveSpeed = TANK_SPEED * delta;
     const rotSpeed = TANK_ROTATION_SPEED * delta;
-    const mouseSensitivity = 2.5;
+    const mouseSensitivity = 1.75;
     
     let turnInput = 0;
     if (Math.abs(mouseX) > 0.1) turnInput -= mouseX * mouseSensitivity;
