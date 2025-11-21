@@ -15,6 +15,7 @@ const MAX_HEALTH = 5;
 let isGameOver = false;
 let isPaused = false;
 let killCount = 0;
+let gameStartTime = 0;
 
 // --- Scene Setup ---
 const scene = new THREE.Scene();
@@ -175,27 +176,7 @@ function updateKillCountDisplay() {
     }
 }
 
-// --- UI: Health Bar & Vignette ---
-const healthBarContainer = document.createElement('div');
-healthBarContainer.style.position = 'absolute';
-healthBarContainer.style.bottom = '30px';
-healthBarContainer.style.left = '50%';
-healthBarContainer.style.transform = 'translateX(-50%)';
-healthBarContainer.style.width = '400px';
-healthBarContainer.style.height = '20px';
-healthBarContainer.style.backgroundColor = '#2E3440'; // Nord0
-healthBarContainer.style.border = '2px solid #4C566A'; // Nord3
-healthBarContainer.style.borderRadius = '4px';
-healthBarContainer.style.zIndex = '10';
-document.body.appendChild(healthBarContainer);
-
-const healthBarFill = document.createElement('div');
-healthBarFill.style.width = '100%';
-healthBarFill.style.height = '100%';
-healthBarFill.style.backgroundColor = '#A3BE8C'; // Nord14 (Green)
-healthBarFill.style.transition = 'width 0.3s, background-color 0.3s';
-healthBarContainer.appendChild(healthBarFill);
-
+// --- UI: Vignette ---
 const vignette = document.createElement('div');
 vignette.style.position = 'absolute';
 vignette.style.top = '0';
@@ -218,21 +199,57 @@ flashOverlay.style.opacity = '0';
 flashOverlay.style.zIndex = '5';
 document.body.appendChild(flashOverlay);
 
+const healthFlashOverlay = document.createElement('div');
+healthFlashOverlay.style.position = 'absolute';
+healthFlashOverlay.style.top = '0';
+healthFlashOverlay.style.left = '0';
+healthFlashOverlay.style.width = '100%';
+healthFlashOverlay.style.height = '100%';
+healthFlashOverlay.style.pointerEvents = 'none';
+healthFlashOverlay.style.opacity = '0';
+healthFlashOverlay.style.zIndex = '6';
+document.body.appendChild(healthFlashOverlay);
+
+const style = document.createElement('style');
+style.innerHTML = `
+@keyframes healthBlink {
+  0% { opacity: 0.5; }
+  25% { opacity: 0; }
+  50% { opacity: 0.5; }
+  100% { opacity: 0; }
+}
+`;
+document.head.appendChild(style);
+
+function triggerHealthFlash(isDamage) {
+    healthFlashOverlay.style.backgroundColor = isDamage ? '#BF616A' : '#A3BE8C';
+    healthFlashOverlay.style.animation = 'none';
+    healthFlashOverlay.offsetHeight; /* trigger reflow */
+    healthFlashOverlay.style.animation = 'healthBlink 0.5s ease-out';
+}
+
 let flashTime = 0;
 
 function updateHealthUI() {
-    const pct = Math.max(0, (tank.health / MAX_HEALTH) * 100);
-    healthBarFill.style.width = `${pct}%`;
-    
     if (tank.health > 3) {
-        healthBarFill.style.backgroundColor = '#A3BE8C'; // Green
         vignette.style.boxShadow = 'inset 0 0 0 0 rgba(191, 97, 106, 0.0)';
     } else if (tank.health > 1) {
-        healthBarFill.style.backgroundColor = '#EBCB8B'; // Yellow
         vignette.style.boxShadow = 'inset 0 0 50px rgba(191, 97, 106, 0.2)';
     } else {
-        healthBarFill.style.backgroundColor = '#BF616A'; // Red
         vignette.style.boxShadow = 'inset 0 0 150px rgba(191, 97, 106, 0.6)';
+    }
+
+    // Update 3D Lights
+    if (tank.healthLights) {
+        tank.healthLights.forEach((light, i) => {
+            if (i < tank.health) {
+                if (tank.health > 3) light.material.color.setHex(0xA3BE8C); // Green
+                else if (tank.health > 1) light.material.color.setHex(0xEBCB8B); // Yellow
+                else light.material.color.setHex(0xBF616A); // Red
+            } else {
+                light.material.color.setHex(0x2E3440); // Off (Dark Grey)
+            }
+        });
     }
 }
 
@@ -243,22 +260,12 @@ pauseOverlay.style.top = '0';
 pauseOverlay.style.left = '0';
 pauseOverlay.style.width = '100%';
 pauseOverlay.style.height = '100%';
-pauseOverlay.style.backgroundColor = 'rgba(46, 52, 64, 0.6)'; // Nord0 transparent
+pauseOverlay.style.backgroundColor = 'transparent';
 pauseOverlay.style.display = 'none';
 pauseOverlay.style.justifyContent = 'center';
 pauseOverlay.style.alignItems = 'center';
 pauseOverlay.style.zIndex = '1000';
 pauseOverlay.style.pointerEvents = 'none'; // Let clicks pass through if needed, though usually pause blocks input
-
-const pauseText = document.createElement('div');
-pauseText.innerText = 'PAUSED';
-pauseText.style.fontFamily = 'sans-serif';
-pauseText.style.color = '#ECEFF4'; // Nord6
-pauseText.style.fontSize = '48px';
-pauseText.style.fontWeight = 'bold';
-pauseText.style.letterSpacing = '4px';
-pauseText.style.textShadow = '2px 2px 0px #2E3440';
-pauseOverlay.appendChild(pauseText);
 
 document.body.appendChild(pauseOverlay);
 
@@ -292,6 +299,12 @@ function setPaused(state) {
     
     isPaused = state;
     pauseOverlay.style.display = isPaused ? 'flex' : 'none';
+    
+    // Toggle UI visibility
+    const uiDisplay = isPaused ? 'none' : 'block';
+    const killDisplay = isPaused ? 'none' : 'flex';
+    radarCanvas.style.display = uiDisplay;
+    killCountContainer.style.display = killDisplay;
 
     if (isPaused) {
         // Save state
@@ -409,7 +422,7 @@ function getVoxelKey(gx, gy, gz) { return `${gx},${gy},${gz}`; }
 
 const COLORS = [
     new THREE.Color(0xA3BE8C), // Nord14 (Green)
-    new THREE.Color(0x8FBCBB), // Nord7 (Teal)
+    new THREE.Color(0xB48EAD), // Nord15 (Purple)
     new THREE.Color(0x4C566A), // Nord3 (Dark Grey)
     new THREE.Color(0xE5E9F0)  // Nord5 (Snow)
 ];
@@ -884,25 +897,6 @@ function generateChunk(cx, cz) {
             }
             
             heightMap[`${gx},${gz}`] = height;
-
-            // Clouds
-            // Simple noise-like pattern
-            const cloudNoise = Math.sin(gx * 0.1) + Math.sin(gz * 0.15) + Math.sin((gx + gz) * 0.05);
-            if (cloudNoise > 1.4) {
-                const cloudHeight = 10 + Math.floor(Math.abs(Math.sin(gx * 0.5)) * 3);
-                
-                dummy.position.set(gx * VOXEL_SIZE, cloudHeight * VOXEL_SIZE, gz * VOXEL_SIZE);
-                dummy.rotation.set(0, 0, 0);
-                dummy.updateMatrix();
-                mesh.setMatrixAt(index, dummy.matrix);
-                mesh.setColorAt(index, CLOUD_COLOR);
-                
-                const cloudKey = getVoxelKey(gx, cloudHeight, gz);
-                voxelMap.set(cloudKey, { mesh, index });
-                registerInstance(mesh, index, cloudKey);
-                chunkKeys.push(cloudKey);
-                index++;
-            }
         }
     }
     
@@ -1128,6 +1122,32 @@ function checkEnvironmentCollision(pos, quat) {
     return false;
 }
 
+function checkTankCollision(pos, quat) {
+    // Chamfered box for smoother sliding
+    // Tank is 4 wide (X), 6 long (Z)
+    // Collision: 3.6 wide, 5.0 long
+    const y = 1; 
+    const points = [
+        new THREE.Vector3(0, y, 2.5),   
+        new THREE.Vector3(0, y, -2.5),  
+        new THREE.Vector3(1.8, y, 0),   
+        new THREE.Vector3(-1.8, y, 0),  
+        new THREE.Vector3(1.5, y, 2.0),  
+        new THREE.Vector3(-1.5, y, 2.0), 
+        new THREE.Vector3(1.5, y, -2.0), 
+        new THREE.Vector3(-1.5, y, -2.0) 
+    ];
+    
+    for (const p of points) {
+        const worldP = p.clone().applyQuaternion(quat).add(pos);
+        const gx = Math.round(worldP.x / VOXEL_SIZE);
+        const gy = Math.round((worldP.y + VOXEL_SIZE/2) / VOXEL_SIZE);
+        const gz = Math.round(worldP.z / VOXEL_SIZE);
+        if (voxelMap.has(getVoxelKey(gx, gy, gz))) return true;
+    }
+    return false;
+}
+
 function resolveEntityCollisions() {
     const units = [tank, ...enemies, ...civilians];
     const radius = 2.5; 
@@ -1232,12 +1252,19 @@ function createTank() {
     bustle.castShadow = true;
     turret.add(bustle);
 
-    // Detail: Antenna (Nord4 - White)
-    const antennaGeo = new THREE.CylinderGeometry(0.05, 0.05, 4);
-    const antennaMat = new THREE.MeshStandardMaterial({ color: 0xD8DEE9 }); // Nord4
-    const antenna = new THREE.Mesh(antennaGeo, antennaMat);
-    antenna.position.set(-1, 2.0, 1);
-    turret.add(antenna);
+    // Health Lights on Bustle
+    const healthLights = [];
+    const lightGeo = new THREE.BoxGeometry(0.4, 0.2, 0.1);
+    
+    for (let i = 0; i < 5; i++) {
+        const lightMat = new THREE.MeshBasicMaterial({ color: 0xA3BE8C }); // Green
+        const light = new THREE.Mesh(lightGeo, lightMat);
+        // Position on back of bustle
+        const x = -1.0 + (i * 0.5);
+        light.position.set(x, 0.5, 2.8); 
+        turret.add(light);
+        healthLights.push(light);
+    }
 
     // Barrel
     const barrelGeo = new THREE.CylinderGeometry(0.3, 0.3, 5, 8);
@@ -1292,6 +1319,7 @@ function createTank() {
         turret: turret, 
         barrel: barrel, 
         bodyMat: bodyMat,
+        healthLights: healthLights,
         leftTrackTexture: leftTrackTexture, 
         rightTrackTexture: rightTrackTexture, 
         currentSpeed: 0,
@@ -1359,6 +1387,7 @@ function takeDamage() {
     if (isGameOver) return;
 
     tank.health -= 1;
+    triggerHealthFlash(true);
     tank.damageFlashTime = 0.1;
     updateHealthUI();
     
@@ -1370,6 +1399,10 @@ function takeDamage() {
 function restartGame() {
     const overlay = document.getElementById('gameOverOverlay');
     if (overlay) overlay.remove();
+
+    // Show UI
+    radarCanvas.style.display = 'block';
+    killCountContainer.style.display = 'flex';
 
     // Reset Tank
     tank.health = MAX_HEALTH;
@@ -1383,6 +1416,7 @@ function restartGame() {
 
     killCount = 0;
     updateKillCountDisplay();
+    gameStartTime = clock.getElapsedTime();
 
     // Clear Enemies
     enemies.forEach(e => scene.remove(e.mesh));
@@ -1425,6 +1459,10 @@ function restartGame() {
 function gameOver() {
     isGameOver = true;
     
+    // Hide UI
+    radarCanvas.style.display = 'none';
+    killCountContainer.style.display = 'none';
+    
     // Move camera to top-down view
     const tankPos = tank.mesh.position;
     const topDownPos = new THREE.Vector3(tankPos.x, 150, tankPos.z + 50); // High up, slightly offset
@@ -1466,7 +1504,7 @@ function gameOver() {
     overlay.style.left = '0';
     overlay.style.width = '100%';
     overlay.style.height = '100%';
-    overlay.style.backgroundColor = 'rgba(46, 52, 64, 0.8)'; // Nord0 transparent
+    overlay.style.backgroundColor = 'transparent';
     overlay.style.display = 'flex';
     overlay.style.flexDirection = 'column';
     overlay.style.justifyContent = 'center';
@@ -1474,28 +1512,25 @@ function gameOver() {
     overlay.style.cursor = 'pointer';
     overlay.style.fontFamily = 'sans-serif';
     
-    const text = document.createElement('div');
-    text.innerText = 'GAME OVER';
-    text.style.color = '#BF616A'; // Nord11
-    text.style.fontSize = '64px';
-    text.style.fontWeight = 'bold';
-    text.style.textShadow = '2px 2px 0px #2E3440';
-    overlay.appendChild(text);
+    const scoreContainer = document.createElement('div');
+    scoreContainer.style.display = 'flex';
+    scoreContainer.style.flexWrap = 'wrap';
+    scoreContainer.style.justifyContent = 'center';
+    scoreContainer.style.gap = '10px';
+    scoreContainer.style.maxWidth = '80%';
+    overlay.appendChild(scoreContainer);
 
-    const scoreText = document.createElement('div');
-    scoreText.innerText = `Total Kills: ${killCount}`;
-    scoreText.style.color = '#EBCB8B'; // Nord13
-    scoreText.style.fontSize = '32px';
-    scoreText.style.marginTop = '20px';
-    scoreText.style.fontWeight = 'bold';
-    overlay.appendChild(scoreText);
-
-    const subText = document.createElement('div');
-    subText.innerText = 'Click anywhere to Restart';
-    subText.style.color = '#ECEFF4'; // Nord6
-    subText.style.fontSize = '24px';
-    subText.style.marginTop = '20px';
-    overlay.appendChild(subText);
+    for (let i = 0; i < killCount; i++) {
+        const div = document.createElement('div');
+        div.innerHTML = tankIconSVG;
+        // Scale up the icon slightly for the game over screen
+        const svg = div.querySelector('svg');
+        if (svg) {
+            svg.setAttribute('width', '48');
+            svg.setAttribute('height', '48');
+        }
+        scoreContainer.appendChild(div);
+    }
     
     overlay.onclick = restartGame;
     
@@ -1504,6 +1539,7 @@ function gameOver() {
 
 function enemyShoot(enemy) {
     const now = clock.getElapsedTime();
+    if (now - gameStartTime < 5) return; // 5 second grace period
     if (now - enemy.lastFireTime < ENEMY_FIRE_COOLDOWN) return;
     
     enemy.lastFireTime = now;
@@ -1529,7 +1565,7 @@ function enemyShoot(enemy) {
     scene.add(projectile);
     projectiles.push(projectile);
 
-    createMuzzleFlash(startPos, direction);
+    createMuzzleFlash(startPos, direction, 3); // Less smoke for enemies
 
     // Screen Flash Indicator
     const toEnemy = enemy.mesh.position.clone().sub(tank.mesh.position);
@@ -1550,36 +1586,54 @@ const particles = [];
 const particleGeo = new THREE.BoxGeometry(1.5, 1.5, 1.5); // Debris chunks
 
 function createExplosion(pos, blockColor) {
-    const nordRed = new THREE.Color(0xBF616A);
-    const nordYellow = new THREE.Color(0xEBCB8B);
+    // 1. Flash
+    const flashGeo = new THREE.BoxGeometry(15, 15, 15);
+    const flashMat = new THREE.MeshBasicMaterial({ color: 0xEBCB8B, transparent: true, opacity: 0.8 });
+    const flash = new THREE.Mesh(flashGeo, flashMat);
+    flash.position.copy(pos);
+    flash.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
+    flash.userData = { velocity: new THREE.Vector3(0,0,0), life: 0.2, noGravity: true };
+    scene.add(flash);
+    particles.push(flash);
 
-    for (let i = 0; i < 8; i++) {
-        let pColor = blockColor;
-        // Half of the cubes (e.g. even indices) should be red or yellow
-        if (i % 2 === 0) {
-            pColor = Math.random() > 0.5 ? nordRed : nordYellow;
-        }
+    // 2. Debris (Red, Orange, Yellow, and Block Color)
+    const colors = [
+        new THREE.Color(0xBF616A), // Red
+        new THREE.Color(0xD08770), // Orange
+        new THREE.Color(0xEBCB8B), // Yellow
+        blockColor || new THREE.Color(0x4C566A) // Original or Dark Grey
+    ];
 
+    for (let i = 0; i < 20; i++) {
+        const pColor = colors[Math.floor(Math.random() * colors.length)];
         const material = new THREE.MeshStandardMaterial({ color: pColor });
         const particle = new THREE.Mesh(particleGeo, material);
         
-        // Start at block center with slight random offset
         particle.position.copy(pos).add(new THREE.Vector3(
-            (Math.random() - 0.5) * 3,
-            (Math.random() - 0.5) * 3,
-            (Math.random() - 0.5) * 3
+            (Math.random() - 0.5) * 4,
+            (Math.random() - 0.5) * 4,
+            (Math.random() - 0.5) * 4
         ));
         
-        // Random velocity outward
         const velocity = new THREE.Vector3(
-            (Math.random() - 0.5) * 20,
-            (Math.random() * 20) + 5, // Upward bias
-            (Math.random() - 0.5) * 20
+            (Math.random() - 0.5) * 30,
+            (Math.random() * 30) + 10,
+            (Math.random() - 0.5) * 30
         );
         
-        particle.userData = { velocity: velocity, life: 1.0 }; // 1 second life
+        particle.userData = { velocity: velocity, life: 1.0 + Math.random() };
         scene.add(particle);
         particles.push(particle);
+    }
+
+    // 3. Smoke
+    for (let i = 0; i < 10; i++) {
+        const smokePos = pos.clone().add(new THREE.Vector3(
+            (Math.random() - 0.5) * 5,
+            Math.random() * 5,
+            (Math.random() - 0.5) * 5
+        ));
+        createExhaust(smokePos);
     }
 }
 
@@ -1684,7 +1738,7 @@ function updateExhaust(delta) {
 
 function createMuzzleFlash(pos, dir) {
     // Flash
-    const flashGeo = new THREE.BoxGeometry(6.0, 6.0, 6.0);
+    const flashGeo = new THREE.BoxGeometry(12.0, 12.0, 12.0);
     const flashMat = new THREE.MeshBasicMaterial({ color: 0xEBCB8B, transparent: true, opacity: 0.9 });
     const flash = new THREE.Mesh(flashGeo, flashMat);
     flash.position.copy(pos);
@@ -1692,36 +1746,6 @@ function createMuzzleFlash(pos, dir) {
     flash.userData = { velocity: new THREE.Vector3(0,0,0), life: 0.15, noGravity: true };
     scene.add(flash);
     particles.push(flash);
-
-    // Smoke Blast
-    for (let i = 0; i < 15; i++) {
-        const smoke = new THREE.Mesh(exhaustGeo, exhaustMat.clone());
-        smoke.position.copy(pos);
-        smoke.scale.setScalar(4.0 + Math.random() * 4.0);
-        
-        // Spread out slightly from muzzle
-        smoke.position.add(new THREE.Vector3(
-            (Math.random() - 0.5) * 1.0,
-            (Math.random() - 0.5) * 1.0,
-            (Math.random() - 0.5) * 1.0
-        ));
-
-        const speed = 20 + Math.random() * 15;
-        const velocity = dir.clone().multiplyScalar(speed);
-        
-        // Add some randomness to direction (cone)
-        velocity.x += (Math.random() - 0.5) * 6;
-        velocity.y += (Math.random() - 0.5) * 6;
-        velocity.z += (Math.random() - 0.5) * 6;
-
-        smoke.userData = {
-            velocity: velocity,
-            life: 0.5 + Math.random() * 0.5,
-            drag: 3.0
-        };
-        scene.add(smoke);
-        exhaustParticles.push(smoke);
-    }
 }
 
 // --- Input Handling ---
@@ -2060,8 +2084,9 @@ function animate() {
 
         // Activity Cycle: 3s Active, 1s Idle (75% Active)
         const isActive = ((now + (enemy.offset || 0)) % 4) < 3;
+        const isFar = dist > RADAR_RANGE;
 
-        if (isActive && dist < 150 && dist > 6) { // Increased range to 150
+        if (isFar || (isActive && dist > 6)) { 
             toPlayer.normalize();
             
             // Calculate angle to player
@@ -2077,8 +2102,9 @@ function animate() {
             
             // Check Blind Spot
             // If hasBlindSpot is true, only engage if player is within ~60 degrees (approx 1.0 radian)
+            // Ignore blind spot if far away (force pursue)
             let canSee = true;
-            if (enemy.hasBlindSpot && Math.abs(diff) > 1.0) {
+            if (!isFar && enemy.hasBlindSpot && Math.abs(diff) > 1.0) {
                 canSee = false;
             }
 
@@ -2153,9 +2179,10 @@ function animate() {
     // Tank Movement
     const moveSpeed = TANK_SPEED * delta;
     const rotSpeed = TANK_ROTATION_SPEED * delta;
+    const mouseSensitivity = 2.5;
     
     let turnInput = 0;
-    if (Math.abs(mouseX) > 0.1) turnInput -= mouseX;
+    if (Math.abs(mouseX) > 0.1) turnInput -= mouseX * mouseSensitivity;
     if (keys.a || keys.arrowleft) turnInput += 1;
     if (keys.d || keys.arrowright) turnInput -= 1;
     
@@ -2165,13 +2192,13 @@ function animate() {
     const rotation = turnInput * rotSpeed;
     if (rotation !== 0) {
         const nextQuat = tank.mesh.quaternion.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), rotation));
-        if (!checkEnvironmentCollision(tank.mesh.position, nextQuat)) {
+        if (!checkTankCollision(tank.mesh.position, nextQuat)) {
             tank.mesh.rotateY(rotation);
         }
     }
 
     let forwardInput = 0;
-    if (Math.abs(mouseY) > 0.1) forwardInput += mouseY;
+    if (Math.abs(mouseY) > 0.1) forwardInput += mouseY * mouseSensitivity;
     if (keys.w || keys.arrowup) forwardInput -= 1;
     if (keys.s || keys.arrowdown) forwardInput += 1;
     
@@ -2231,16 +2258,16 @@ function animate() {
         // Try to push blocks
         attemptPush(targetPos, direction);
 
-        if (!checkEnvironmentCollision(targetPos, tank.mesh.quaternion)) {
+        if (!checkTankCollision(targetPos, tank.mesh.quaternion)) {
             tank.mesh.position.copy(targetPos);
         } else {
             // Slide
             const slideX = currentPos.clone().add(new THREE.Vector3(direction.x, 0, 0));
-            if (!checkEnvironmentCollision(slideX, tank.mesh.quaternion)) {
+            if (!checkTankCollision(slideX, tank.mesh.quaternion)) {
                 tank.mesh.position.copy(slideX);
             } else {
                 const slideZ = currentPos.clone().add(new THREE.Vector3(0, 0, direction.z));
-                if (!checkEnvironmentCollision(slideZ, tank.mesh.quaternion)) {
+                if (!checkTankCollision(slideZ, tank.mesh.quaternion)) {
                     tank.mesh.position.copy(slideZ);
                 }
             }
@@ -2249,12 +2276,48 @@ function animate() {
     
     // Terrain following
     const tankPos = tank.mesh.position;
-    const terrainHeight = getTerrainHeight(tankPos.x, tankPos.z);
+    
+    // Multi-Point Suspension: Check 4 corners of the tank
+    // Tank is approx 4 wide, 6 long. We check slightly inside the tracks.
+    const corners = [
+        new THREE.Vector3(1.5, 0, 2.5),  // Back Left
+        new THREE.Vector3(-1.5, 0, 2.5), // Back Right
+        new THREE.Vector3(1.5, 0, -2.5), // Front Left
+        new THREE.Vector3(-1.5, 0, -2.5) // Front Right
+    ];
+    
+    let bestHeight = -100;
+    const stepHeight = 2.5; // Max climbable height (half a block)
+
+    for (const p of corners) {
+        // Transform local corner to world space
+        const worldP = p.clone().applyQuaternion(tank.mesh.quaternion).add(tankPos);
+        const h = getTerrainHeight(worldP.x, worldP.z);
+        
+        // Filter: Only consider heights that are not "walls" (too high above us)
+        // But allow snapping up if we are slightly below (sinking correction)
+        if (h <= tankPos.y + stepHeight) {
+            if (h > bestHeight) bestHeight = h;
+        }
+    }
+    
+    // Fallback to center if no valid corners found (e.g. deep hole or stuck)
+    if (bestHeight === -100) {
+        bestHeight = getTerrainHeight(tankPos.x, tankPos.z);
+    }
+
+    const terrainHeight = bestHeight;
     
     // Simple gravity/snap to ground
     if (terrainHeight > -50) { // If on map
-        // Smoothly interpolate Y
-        tank.mesh.position.y = THREE.MathUtils.lerp(tank.mesh.position.y, terrainHeight, 0.1);
+        // Always try to stay on top of the terrain
+        // If we are below the terrain (sinking) or slightly above (floating), snap to it.
+        
+        // Use a faster lerp if we are significantly below ground (recovery)
+        const diff = Math.abs(tank.mesh.position.y - terrainHeight);
+        const lerpFactor = diff > 1.0 ? 0.2 : 0.1;
+        
+        tank.mesh.position.y = THREE.MathUtils.lerp(tank.mesh.position.y, terrainHeight, lerpFactor);
     } else {
         // Fall if off map
         tank.mesh.position.y -= 9.8 * delta;
@@ -2356,6 +2419,7 @@ function animate() {
                     
                     if (killCount % 5 === 0 && tank.health < MAX_HEALTH) {
                         tank.health++;
+                        triggerHealthFlash(false);
                         updateHealthUI();
                     }
 
