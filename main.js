@@ -948,8 +948,8 @@ function generateChunk(cx, cz) {
         
         // Ensure we spawn on flat ground (height 0)
         // Check if there is a hill at this location
-        const hillKey = getVoxelKey(gx, 1, gz);
-        if (!voxelMap.has(hillKey)) {
+        const h = heightMap[`${gx},${gz}`];
+        if (h === 0) {
             const pos = new THREE.Vector3(gx * VOXEL_SIZE, 0, gz * VOXEL_SIZE);
             createEnemyTank(pos);
         }
