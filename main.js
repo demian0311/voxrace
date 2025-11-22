@@ -2462,12 +2462,16 @@ function animate() {
     }
 
     let forwardInput = 0;
+    const isKeyboardMoving = keys.w || keys.arrowup || keys.s || keys.arrowdown;
+
     if (isTouchActive) {
         forwardInput = touchForwardInput;
-    } else {
-        if (Math.abs(mouseY) > 0.1) forwardInput += mouseY * mouseSensitivity;
+    } else if (isKeyboardMoving) {
         if (keys.w || keys.arrowup) forwardInput -= 1;
         if (keys.s || keys.arrowdown) forwardInput += 1;
+        mouseY = 0; // Reset mouse input
+    } else {
+        if (Math.abs(mouseY) > 0.1) forwardInput += mouseY * mouseSensitivity;
     }
     
     forwardInput = Math.max(-1, Math.min(1, forwardInput));
