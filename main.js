@@ -946,10 +946,23 @@ function generateChunk(cx, cz) {
         const gx = startX + rx;
         const gz = startZ + rz;
         
-        // Ensure we spawn on flat ground (height 0)
-        // Check if there is a hill at this location
-        const h = heightMap[`${gx},${gz}`];
-        if (h === 0) {
+        // Ensure we spawn on flat ground (height 0) and have clearance
+        // Check 3x3 area (tank is large and rotates)
+        let clear = true;
+        for(let dx = -1; dx <= 1; dx++) {
+            for(let dz = -1; dz <= 1; dz++) {
+                const key = `${gx+dx},${gz+dz}`;
+                const h = heightMap[key];
+                // Must be explicitly 0 (ground level). Undefined means unknown/not generated -> unsafe.
+                if (h !== 0) {
+                    clear = false;
+                    break;
+                }
+            }
+            if(!clear) break;
+        }
+
+        if (clear) {
             const pos = new THREE.Vector3(gx * VOXEL_SIZE, 0, gz * VOXEL_SIZE);
             createEnemyTank(pos);
         }
