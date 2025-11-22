@@ -2382,7 +2382,7 @@ function animate() {
     let rotation = turnInput * rotSpeed;
 
     // --- Aim Assist ---
-    const AIM_ASSIST_ANGLE = 0.2; // ~11 degrees
+    const AIM_ASSIST_ANGLE = isTouchActive ? 0.4 : 0.2; // Wider angle for touch (~22 deg vs ~11 deg)
     const SNAP_SPEED = rotSpeed * 2.0;
     let bestEnemy = null;
     let minAngle = Infinity;
@@ -2422,7 +2422,7 @@ function animate() {
         
         // Smoothly interpolate towards the target
         // Calculate a "magnetic" pull based on angle
-        const assistFactor = 0.15; // How much of the gap to close per frame
+        const assistFactor = isTouchActive ? 0.3 : 0.15; // Stronger pull for touch
         let assistRotation = minAngle * Math.sign(crossY) * assistFactor;
         
         // Limit assist speed to avoid snapping too hard
@@ -2430,7 +2430,9 @@ function animate() {
         assistRotation = Math.max(-maxAssist, Math.min(maxAssist, assistRotation));
 
         // If user is manually turning
-        if (Math.abs(turnInput) > 0.01) {
+        // Increased threshold to 0.2 for touch to allow for slight touch inaccuracies when driving straight
+        const manualThreshold = isTouchActive ? 0.2 : 0.05;
+        if (Math.abs(turnInput) > manualThreshold) {
             const userDir = Math.sign(turnInput);
             const assistDir = Math.sign(assistRotation);
             
