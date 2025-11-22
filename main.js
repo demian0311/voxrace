@@ -1570,6 +1570,7 @@ function gameOver() {
             currentRow.style.display = 'flex';
             currentRow.style.gap = '10px';
             currentRow.style.justifyContent = 'center';
+            currentRow.style.flexWrap = 'nowrap'; // Force single row
             scoreContainer.appendChild(currentRow);
         }
         
@@ -1581,6 +1582,7 @@ function gameOver() {
             svg.setAttribute('width', '48');
             svg.setAttribute('height', '48');
         }
+        div.style.flexShrink = '0'; // Prevent icons from squishing
         currentRow.appendChild(div);
     }
     
