@@ -2422,7 +2422,7 @@ function animate() {
         
         // Smoothly interpolate towards the target
         // Calculate a "magnetic" pull based on angle
-        const assistFactor = isTouchActive ? 0.3 : 0.15; // Stronger pull for touch
+        const assistFactor = isTouchActive ? 0.6 : 0.15; // Stronger pull for touch
         let assistRotation = minAngle * Math.sign(crossY) * assistFactor;
         
         // Limit assist speed to avoid snapping too hard
