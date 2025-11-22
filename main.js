@@ -1807,6 +1807,134 @@ function createMuzzleFlash(pos, dir) {
     particles.push(flash);
 }
 
+// --- Touch Controls ---
+let touchTurnInput = 0;
+let touchForwardInput = 0;
+let isTouchActive = false;
+
+function createTouchControls() {
+    // Joystick Container
+    const joystickZone = document.createElement('div');
+    joystickZone.style.position = 'absolute';
+    joystickZone.style.bottom = '40px';
+    joystickZone.style.left = '40px';
+    joystickZone.style.width = '120px';
+    joystickZone.style.height = '120px';
+    joystickZone.style.background = 'rgba(255, 255, 255, 0.1)';
+    joystickZone.style.borderRadius = '50%';
+    joystickZone.style.border = '2px solid rgba(255, 255, 255, 0.3)';
+    joystickZone.style.touchAction = 'none'; // Prevent scrolling
+    document.body.appendChild(joystickZone);
+
+    // Joystick Knob
+    const knob = document.createElement('div');
+    knob.style.position = 'absolute';
+    knob.style.top = '50%';
+    knob.style.left = '50%';
+    knob.style.width = '50px';
+    knob.style.height = '50px';
+    knob.style.background = 'rgba(255, 255, 255, 0.5)';
+    knob.style.borderRadius = '50%';
+    knob.style.transform = 'translate(-50%, -50%)';
+    knob.style.pointerEvents = 'none';
+    joystickZone.appendChild(knob);
+
+    // Fire Button
+    const fireBtn = document.createElement('div');
+    fireBtn.style.position = 'absolute';
+    fireBtn.style.bottom = '60px';
+    fireBtn.style.right = '60px';
+    fireBtn.style.width = '80px';
+    fireBtn.style.height = '80px';
+    fireBtn.style.background = 'rgba(191, 97, 106, 0.6)'; // Nord11
+    fireBtn.style.borderRadius = '50%';
+    fireBtn.style.border = '2px solid rgba(255, 255, 255, 0.3)';
+    fireBtn.style.touchAction = 'none';
+    document.body.appendChild(fireBtn);
+
+    // Joystick Logic
+    let startX = 0;
+    let startY = 0;
+    
+    joystickZone.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        isTouchActive = true;
+        const touch = e.changedTouches[0];
+        startX = touch.clientX;
+        startY = touch.clientY;
+        
+        // Center knob on touch if inside? No, standard virtual joystick usually centers on touch or is fixed.
+        // Let's keep it fixed center for now, but track relative movement.
+        // Actually, better to track from center of the zone.
+        const rect = joystickZone.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        
+        updateJoystick(touch.clientX, touch.clientY, centerX, centerY);
+    }, { passive: false });
+
+    joystickZone.addEventListener('touchmove', (e) => {
+        e.preventDefault();
+        const touch = e.changedTouches[0];
+        const rect = joystickZone.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        updateJoystick(touch.clientX, touch.clientY, centerX, centerY);
+    }, { passive: false });
+
+    joystickZone.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        isTouchActive = false;
+        touchTurnInput = 0;
+        touchForwardInput = 0;
+        knob.style.transform = 'translate(-50%, -50%)';
+    });
+
+    function updateJoystick(tx, ty, cx, cy) {
+        const maxDist = 40;
+        let dx = tx - cx;
+        let dy = ty - cy;
+        
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > maxDist) {
+            const angle = Math.atan2(dy, dx);
+            dx = Math.cos(angle) * maxDist;
+            dy = Math.sin(angle) * maxDist;
+        }
+        
+        knob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+        
+        // Map to inputs (-1 to 1)
+        // X is turn (Left/Right) -> -1 is Left (Right turn?), 1 is Right
+        // In game: turnInput += 1 is Left. So negative X is Left.
+        // Wait, keys.a (Left) -> turnInput += 1.
+        // So Left (-X) should be +1 turnInput.
+        touchTurnInput = -(dx / maxDist); 
+        
+        // Y is forward/back. Up (-Y) is Forward.
+        // In game: keys.w (Forward) -> forwardInput -= 1.
+        // So Up (-Y) should be -1 forwardInput.
+        touchForwardInput = (dy / maxDist);
+    }
+
+    // Fire Button Logic
+    fireBtn.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        shoot();
+        fireBtn.style.background = 'rgba(191, 97, 106, 0.9)';
+    }, { passive: false });
+
+    fireBtn.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        fireBtn.style.background = 'rgba(191, 97, 106, 0.6)';
+    });
+}
+
+// Detect Touch Device
+if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+    createTouchControls();
+}
+
 // --- Input Handling ---
 const keys = {
     w: false,
@@ -2242,6 +2370,8 @@ function animate() {
         if (keys.a || keys.arrowleft) turnInput += 1;
         if (keys.d || keys.arrowright) turnInput -= 1;
         mouseX = 0; // Reset mouse input so it doesn't snap back when keys are released
+    } else if (isTouchActive) {
+        turnInput = touchTurnInput;
     } else {
         if (Math.abs(mouseX) > 0.1) turnInput -= mouseX * mouseSensitivity;
     }
@@ -2330,9 +2460,13 @@ function animate() {
     }
 
     let forwardInput = 0;
-    if (Math.abs(mouseY) > 0.1) forwardInput += mouseY * mouseSensitivity;
-    if (keys.w || keys.arrowup) forwardInput -= 1;
-    if (keys.s || keys.arrowdown) forwardInput += 1;
+    if (isTouchActive) {
+        forwardInput = touchForwardInput;
+    } else {
+        if (Math.abs(mouseY) > 0.1) forwardInput += mouseY * mouseSensitivity;
+        if (keys.w || keys.arrowup) forwardInput -= 1;
+        if (keys.s || keys.arrowdown) forwardInput += 1;
+    }
     
     forwardInput = Math.max(-1, Math.min(1, forwardInput));
     
