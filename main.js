@@ -2236,9 +2236,15 @@ function animate() {
     const mouseSensitivity = 1.75;
     
     let turnInput = 0;
-    if (Math.abs(mouseX) > 0.1) turnInput -= mouseX * mouseSensitivity;
-    if (keys.a || keys.arrowleft) turnInput += 1;
-    if (keys.d || keys.arrowright) turnInput -= 1;
+    const isKeyboardTurning = keys.a || keys.arrowleft || keys.d || keys.arrowright;
+
+    if (isKeyboardTurning) {
+        if (keys.a || keys.arrowleft) turnInput += 1;
+        if (keys.d || keys.arrowright) turnInput -= 1;
+        mouseX = 0; // Reset mouse input so it doesn't snap back when keys are released
+    } else {
+        if (Math.abs(mouseX) > 0.1) turnInput -= mouseX * mouseSensitivity;
+    }
     
     // Clamp
     turnInput = Math.max(-1, Math.min(1, turnInput));
