@@ -20,10 +20,11 @@ let gameStartTime = 0;
 
 // --- Scene Setup ---
 const scene = new THREE.Scene();
-const HORIZON_COLOR = 0x88C0D0; // Nord8 (Light Blue)
-const SKY_COLOR = 0x5E81AC; // Nord10 (Darker Blue)
+const HORIZON_COLOR = 0x88C0D0; // Nord8 (Frost)
+const SKY_COLOR = 0x2E3440; // Nord0 (Polar Night)
+const FOG_COLOR = 0x2E3440; // Nord0 (Dark)
 
-scene.fog = new THREE.FogExp2(HORIZON_COLOR, 0.005);
+scene.fog = new THREE.FogExp2(FOG_COLOR, 0.005);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 5000);
 camera.position.set(0, 20, 30);
@@ -96,25 +97,33 @@ function updateRadar() {
         // relPos.z is forward (negative) / backward (positive)
         // relPos.x is right (positive) / left (negative)
         
-        const dist = relPos.length();
+        let px = cx + relPos.x * scale;
+        let py = cy + relPos.z * scale;
         
-        if (dist < RADAR_RANGE) {
-            const px = cx + relPos.x * scale;
-            const py = cy + relPos.z * scale;
-            
-            radarCtx.fillStyle = '#BF616A'; // Nord11
-            radarCtx.beginPath();
-            radarCtx.arc(px, py, 5, 0, Math.PI * 2);
-            radarCtx.fill();
+        // Clamp to radar bounds (Outer Ring)
+        const dx = px - cx;
+        const dy = py - cy;
+        const distFromCenter = Math.sqrt(dx*dx + dy*dy);
+        const maxRadius = width * 0.45; 
 
-            // Enemy Firing Indicator
-            if (now - enemy.lastFireTime < 0.2) {
-                radarCtx.strokeStyle = '#EBCB8B'; // Nord13 (Yellow)
-                radarCtx.lineWidth = 2;
-                radarCtx.beginPath();
-                radarCtx.arc(px, py, 8, 0, Math.PI * 2);
-                radarCtx.stroke();
-            }
+        if (distFromCenter > maxRadius) {
+            const angle = Math.atan2(dy, dx);
+            px = cx + Math.cos(angle) * maxRadius;
+            py = cy + Math.sin(angle) * maxRadius;
+        }
+        
+        radarCtx.fillStyle = '#BF616A'; // Nord11
+        radarCtx.beginPath();
+        radarCtx.arc(px, py, 5, 0, Math.PI * 2);
+        radarCtx.fill();
+
+        // Enemy Firing Indicator
+        if (now - enemy.lastFireTime < 0.2) {
+            radarCtx.strokeStyle = '#EBCB8B'; // Nord13 (Yellow)
+            radarCtx.lineWidth = 2;
+            radarCtx.beginPath();
+            radarCtx.arc(px, py, 8, 0, Math.PI * 2);
+            radarCtx.stroke();
         }
     });
 
@@ -347,7 +356,7 @@ const skyMat = new THREE.ShaderMaterial({
     uniforms: {
         topColor: { value: new THREE.Color( SKY_COLOR ) },
         bottomColor: { value: new THREE.Color( HORIZON_COLOR ) },
-        offset: { value: 33 },
+        offset: { value: 10 },
         exponent: { value: 0.6 }
     },
     vertexShader: vertexShader,
@@ -1548,13 +1557,22 @@ function gameOver() {
     
     const scoreContainer = document.createElement('div');
     scoreContainer.style.display = 'flex';
-    scoreContainer.style.flexWrap = 'wrap';
-    scoreContainer.style.justifyContent = 'center';
+    scoreContainer.style.flexDirection = 'column';
     scoreContainer.style.gap = '10px';
-    scoreContainer.style.maxWidth = '80%';
+    scoreContainer.style.alignItems = 'center';
+    scoreContainer.style.maxWidth = '90%';
     overlay.appendChild(scoreContainer);
 
+    let currentRow;
     for (let i = 0; i < killCount; i++) {
+        if (i % 10 === 0) {
+            currentRow = document.createElement('div');
+            currentRow.style.display = 'flex';
+            currentRow.style.gap = '10px';
+            currentRow.style.justifyContent = 'center';
+            scoreContainer.appendChild(currentRow);
+        }
+        
         const div = document.createElement('div');
         div.innerHTML = tankIconSVG;
         // Scale up the icon slightly for the game over screen
@@ -1563,7 +1581,7 @@ function gameOver() {
             svg.setAttribute('width', '48');
             svg.setAttribute('height', '48');
         }
-        scoreContainer.appendChild(div);
+        currentRow.appendChild(div);
     }
     
     overlay.onclick = restartGame;
@@ -2223,7 +2241,79 @@ function animate() {
     // Clamp
     turnInput = Math.max(-1, Math.min(1, turnInput));
 
-    const rotation = turnInput * rotSpeed;
+    let rotation = turnInput * rotSpeed;
+
+    // --- Aim Assist ---
+    const AIM_ASSIST_ANGLE = 0.2; // ~11 degrees
+    const SNAP_SPEED = rotSpeed * 2.0;
+    let bestEnemy = null;
+    let minAngle = Infinity;
+    let targetDir = null;
+    
+    const tankForward = new THREE.Vector3(0, 0, -1).applyQuaternion(tank.mesh.quaternion);
+
+    enemies.forEach(enemy => {
+        const dist = tank.mesh.position.distanceTo(enemy.mesh.position);
+        if (dist > RADAR_RANGE) return; 
+
+        // Predict position (Lead the target)
+        const timeToHit = dist / PLAYER_PROJECTILE_SPEED;
+        let predictedPos = enemy.mesh.position.clone();
+        
+        // Enemies stop at dist < 6. If further, assume they are moving.
+        if (dist > 10) { 
+             const enemyForward = new THREE.Vector3(0, 0, -1).applyQuaternion(enemy.mesh.quaternion);
+             predictedPos.addScaledVector(enemyForward, ENEMY_SPEED * timeToHit);
+        }
+
+        const toTarget = predictedPos.sub(tank.mesh.position);
+        toTarget.y = 0;
+        toTarget.normalize();
+
+        const angle = tankForward.angleTo(toTarget);
+
+        if (angle < AIM_ASSIST_ANGLE && angle < minAngle) {
+            minAngle = angle;
+            bestEnemy = enemy;
+            targetDir = toTarget;
+        }
+    });
+
+    if (bestEnemy && targetDir) {
+        const crossY = tankForward.z * targetDir.x - tankForward.x * targetDir.z;
+        
+        // Smoothly interpolate towards the target
+        // Calculate a "magnetic" pull based on angle
+        const assistFactor = 0.15; // How much of the gap to close per frame
+        let assistRotation = minAngle * Math.sign(crossY) * assistFactor;
+        
+        // Limit assist speed to avoid snapping too hard
+        const maxAssist = rotSpeed * 0.5; 
+        assistRotation = Math.max(-maxAssist, Math.min(maxAssist, assistRotation));
+
+        // If user is manually turning
+        if (Math.abs(turnInput) > 0.01) {
+            const userDir = Math.sign(turnInput);
+            const assistDir = Math.sign(assistRotation);
+            
+            // If user is fighting the assist (turning away from target), 
+            // drastically reduce assist to let them break free easily.
+            if (userDir !== assistDir && assistDir !== 0) {
+                assistRotation *= 0.05; // Almost disable assist
+            } else {
+                // User is turning into the assist. 
+                // Reduce assist slightly so it doesn't feel like "acceleration"
+                assistRotation *= 0.5;
+            }
+        }
+        
+        // Apply assist
+        rotation += assistRotation;
+        
+        // Clamp total rotation to reasonable limits
+        rotation = Math.max(-rotSpeed * 1.5, Math.min(rotSpeed * 1.5, rotation));
+    }
+
     if (rotation !== 0) {
         const nextQuat = tank.mesh.quaternion.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), rotation));
         if (!checkTankCollision(tank.mesh.position, nextQuat)) {
