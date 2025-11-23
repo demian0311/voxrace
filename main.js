@@ -36,6 +36,7 @@ document.body.appendChild(renderer.domElement);
 
 // --- UI: Radar ---
 const radarCanvas = document.createElement('canvas');
+radarCanvas.id = 'radar';
 radarCanvas.width = 200;
 radarCanvas.height = 200;
 radarCanvas.style.position = 'absolute';

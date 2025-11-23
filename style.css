@@ -19,3 +19,8 @@ canvas {
     pointer-events: none;
     user-select: none;
 }
+@media screen and (orientation: landscape) and (max-height: 500px) {
+    #radar {
+        display: none !important;
+    }
+}
