@@ -20,9 +20,9 @@ let gameStartTime = 0;
 
 // --- Scene Setup ---
 const scene = new THREE.Scene();
-const HORIZON_COLOR = 0x88C0D0; // Nord8 (Frost)
-const SKY_COLOR = 0x2E3440; // Nord0 (Polar Night)
-const FOG_COLOR = 0x2E3440; // Nord0 (Dark)
+const HORIZON_COLOR = 0xE5E9F0; // Nord5 (Snow)
+const SKY_COLOR = 0x88C0D0; // Nord8 (Frost)
+const FOG_COLOR = 0xE5E9F0; // Nord5 (Snow)
 
 scene.fog = new THREE.FogExp2(FOG_COLOR, 0.005);
 
