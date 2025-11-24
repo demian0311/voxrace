@@ -767,7 +767,7 @@ function createEnemyTank(pos) {
     });
 }
 
-function createCivilianCar(pos, color) {
+function createCivilianCar(pos, color, speed) {
     const group = new THREE.Group();
     group.position.copy(pos);
     
@@ -792,7 +792,7 @@ function createCivilianCar(pos, color) {
     scene.add(group);
     civilians.push({ 
         mesh: group, 
-        speed: ENEMY_SPEED * 0.75, // Slower than enemies but moving
+        speed: speed !== undefined ? speed : ENEMY_SPEED * 0.75, 
         color: color
     });
 }
@@ -888,9 +888,9 @@ function generateChunk(cx, cz) {
     const startZ = cz * CHUNK_SIZE;
     
     // Town Logic:
-    // Global Road Grid: Every 8th chunk is a "Highway" (More sparse)
-    const isRoadX = (Math.abs(cx) % 8 === 0);
-    const isRoadZ = (Math.abs(cz) % 8 === 0);
+    // Global Road Grid: Every 4th chunk is a "Highway" (More frequent)
+    const isRoadX = (Math.abs(cx) % 4 === 0);
+    const isRoadZ = (Math.abs(cz) % 4 === 0);
     const isIntersection = isRoadX && isRoadZ;
     
     // Towns appear along roads, especially at intersections
@@ -944,38 +944,7 @@ function generateChunk(cx, cz) {
 
             if (isStreetVoxel) {
                 // Street - Flat, no buildings
-                // Chance for car
-                if (rng() < 0.05) {
-                     const cColor = new THREE.Color(0xE5E9F0); // White car
-                     const carPos = new THREE.Vector3(gx * VOXEL_SIZE, 1.4, gz * VOXEL_SIZE);
-                     createCivilianCar(carPos, cColor);
-                     
-                     // Align car with street
-                     // If intersection, random. Else align with road.
-                     if (isRoadX && isRoadZ) {
-                         const inVert = (x >= 3 && x <= 6);
-                         const inHoriz = (z >= 3 && z <= 6);
-                         
-                         if (inVert && inHoriz) {
-                             // Center: Random
-                             civilians[civilians.length-1].mesh.rotation.y = (Math.floor(rng() * 4) * Math.PI) / 2;
-                         } else if (inVert) {
-                             // Vertical arm (Road along Z) -> Face Z (PI/2 or -PI/2)
-                             civilians[civilians.length-1].mesh.rotation.y = (rng() > 0.5) ? Math.PI / 2 : -Math.PI / 2;
-                         } else {
-                             // Horizontal arm (Road along X) -> Face X (0 or PI)
-                             civilians[civilians.length-1].mesh.rotation.y = (rng() > 0.5) ? 0 : Math.PI;
-                         }
-                     } else if (isRoadX) {
-                         // Road runs along Z axis (North/South)
-                         // Car should face Z (PI/2 or -PI/2)
-                         civilians[civilians.length-1].mesh.rotation.y = (rng() > 0.5) ? Math.PI / 2 : -Math.PI / 2;
-                     } else {
-                         // Road runs along X axis (East/West)
-                         // Car should face X (0 or PI)
-                         civilians[civilians.length-1].mesh.rotation.y = (rng() > 0.5) ? 0 : Math.PI;
-                     }
-                }
+                // Cars are now spawned dynamically in updateTraffic()
             } else if (isTown) {
                 // Town Generation (Non-Street areas)
                 
@@ -992,18 +961,29 @@ function generateChunk(cx, cz) {
                         new THREE.Color(0xB48EAD)  // Purple
                     ][Math.floor(rng() * 5)];
 
+                    // Create ONE tall block to avoid seams
+                    dummy.position.set(gx * VOXEL_SIZE, (buildingHeight * VOXEL_SIZE) / 2, gz * VOXEL_SIZE);
+                    dummy.scale.set(1, buildingHeight, 1);
+                    dummy.updateMatrix();
+                    mesh.setMatrixAt(index, dummy.matrix);
+                    mesh.setColorAt(index, bColor);
+                    
+                    // Reset scale
+                    dummy.scale.set(1, 1, 1);
+
+                    const relatedKeys = [];
                     for (let h = 1; h <= buildingHeight; h++) {
-                        dummy.position.set(gx * VOXEL_SIZE, (h * VOXEL_SIZE) - (VOXEL_SIZE/2), gz * VOXEL_SIZE);
-                        dummy.updateMatrix();
-                        mesh.setMatrixAt(index, dummy.matrix);
-                        mesh.setColorAt(index, bColor);
-                        
+                        relatedKeys.push(getVoxelKey(gx, h, gz));
+                    }
+
+                    for (let h = 1; h <= buildingHeight; h++) {
                         const bKey = getVoxelKey(gx, h, gz);
-                        voxelMap.set(bKey, { mesh, index });
+                        voxelMap.set(bKey, { mesh, index, relatedKeys });
                         registerInstance(mesh, index, bKey);
                         chunkKeys.push(bKey);
-                        index++;
                     }
+                    index++;
+
                     height = buildingHeight * VOXEL_SIZE;
                 }
             } else {
@@ -1133,6 +1113,92 @@ function generateChunk(cx, cz) {
 
 let lastChunkX = null;
 let lastChunkZ = null;
+
+function updateTraffic() {
+    // Cleanup
+    const despawnDist = DRAW_DISTANCE * CHUNK_SIZE * VOXEL_SIZE; // ~600
+    for (let i = civilians.length - 1; i >= 0; i--) {
+        if (civilians[i].mesh.position.distanceTo(tank.mesh.position) > despawnDist) {
+            scene.remove(civilians[i].mesh);
+            civilians.splice(i, 1);
+        }
+    }
+
+    // Spawn
+    if (civilians.length < 50) {
+        // Try to spawn a car
+        const angle = Math.random() * Math.PI * 2;
+        const dist = 100 + Math.random() * 200; // 100-300 units away
+        
+        const spawnPos = tank.mesh.position.clone().add(new THREE.Vector3(Math.cos(angle)*dist, 0, Math.sin(angle)*dist));
+        
+        // Snap to chunk
+        const cx = Math.floor(spawnPos.x / (CHUNK_SIZE * VOXEL_SIZE));
+        const cz = Math.floor(spawnPos.z / (CHUNK_SIZE * VOXEL_SIZE));
+        
+        // Check if road chunk
+        const isRoadX = (Math.abs(cx) % 4 === 0);
+        const isRoadZ = (Math.abs(cz) % 4 === 0);
+        
+        if (isRoadX || isRoadZ) {
+            // Find road coordinate within chunk
+            // Road is x/z 3..6
+            const lx = Math.floor((spawnPos.x - cx * CHUNK_SIZE * VOXEL_SIZE) / VOXEL_SIZE);
+            const lz = Math.floor((spawnPos.z - cz * CHUNK_SIZE * VOXEL_SIZE) / VOXEL_SIZE);
+            
+            let valid = false;
+            if (isRoadX && lx >= 3 && lx <= 6) valid = true;
+            if (isRoadZ && lz >= 3 && lz <= 6) valid = true;
+            
+            if (valid) {
+                // Snap to center of voxel
+                spawnPos.x = (Math.floor(spawnPos.x / VOXEL_SIZE) * VOXEL_SIZE);
+                spawnPos.z = (Math.floor(spawnPos.z / VOXEL_SIZE) * VOXEL_SIZE);
+                spawnPos.y = 1.4;
+                
+                // Check if loaded (heightmap check)
+                const h = getTerrainHeight(spawnPos.x, spawnPos.z);
+                if (h > -50) {
+                    // Check overlap
+                    let clear = true;
+                    for(const c of civilians) {
+                        if (c.mesh.position.distanceTo(spawnPos) < 10) { clear = false; break; }
+                    }
+                    
+                    if (clear) {
+                        // Random Car Color (Nord Palette excluding Red/Nord11)
+                        const carColors = [
+                            0x2E3440, 0x3B4252, 0x434C5E, 0x4C566A, // Dark Greys
+                            0xD8DEE9, 0xE5E9F0, 0xECEFF4,           // Whites
+                            0x8FBCBB, 0x88C0D0, 0x81A1C1, 0x5E81AC, // Blues/Teals
+                            0xD08770, 0xEBCB8B, 0xA3BE8C, 0xB48EAD  // Orange, Yellow, Green, Purple
+                        ];
+                        const cColor = new THREE.Color(carColors[Math.floor(Math.random() * carColors.length)]);
+
+                        // 90% moving, 10% parked
+                        const isMoving = Math.random() < 0.9;
+                        const speed = isMoving ? ENEMY_SPEED * 0.75 : 0;
+                        
+                        createCivilianCar(spawnPos, cColor, speed);
+                        
+                        // Orient car
+                        const car = civilians[civilians.length-1];
+                        if (isRoadX && isRoadZ) {
+                             // Intersection: Random cardinal direction
+                             car.mesh.rotation.y = (Math.floor(Math.random() * 4) * Math.PI) / 2;
+                        } else if (isRoadX) {
+                             // Road along Z -> Face Z (North/South)
+                             car.mesh.rotation.y = (Math.random() > 0.5) ? Math.PI / 2 : -Math.PI / 2;
+                        } else {
+                             // Road along X -> Face X (East/West)
+                             car.mesh.rotation.y = (Math.random() > 0.5) ? 0 : Math.PI;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 function updateChunks() {
     const tankPos = tank.mesh.position;
@@ -1347,12 +1413,45 @@ function resolveEntityCollisions() {
     const radius = 2.5; 
 
     for (let i = 0; i < units.length; i++) {
+        if (units[i].isDestroyed) continue;
+
         for (let j = i + 1; j < units.length; j++) {
+            if (units[j].isDestroyed) continue;
+
             const u1 = units[i];
             const u2 = units[j];
             
             const dist = u1.mesh.position.distanceTo(u2.mesh.position);
             if (dist < radius * 2) {
+                // Check for Tank vs Civilian (Crush)
+                let player = null;
+                let civ = null;
+                
+                if (u1 === tank && civilians.includes(u2)) { player = u1; civ = u2; }
+                else if (u2 === tank && civilians.includes(u1)) { player = u2; civ = u1; }
+                
+                if (player && civ) {
+                    // CRUSH!
+                    // Smaller explosion for crushing cars (Scale 0.3)
+                    createExplosion(civ.mesh.position, civ.color, 0.3);
+                    createSmokeEmitter(civ.mesh.position, 2.0);
+                    
+                    // Remove civilian
+                    scene.remove(civ.mesh);
+                    const idx = civilians.indexOf(civ);
+                    if (idx > -1) civilians.splice(idx, 1);
+                    civ.isDestroyed = true; 
+                    
+                    // Slow down tank
+                    player.currentSpeed *= 0.7; // Lose 30% speed
+                    
+                    // Visual Bump (Climb over)
+                    player.mesh.position.y += 0.8;
+                    player.innerMesh.rotation.x += 0.2; 
+                    
+                    continue; 
+                }
+
                 const overlap = (radius * 2) - dist;
                 const dir = u1.mesh.position.clone().sub(u2.mesh.position).normalize();
                 
@@ -1819,11 +1918,19 @@ function enemyShoot(enemy) {
 const particles = [];
 const particleGeo = new THREE.BoxGeometry(1.5, 1.5, 1.5); // Debris chunks
 
-function createExplosion(pos, blockColor) {
+// Shared Materials
+const particleMaterials = {
+    red: new THREE.MeshStandardMaterial({ color: 0xBF616A }),
+    orange: new THREE.MeshStandardMaterial({ color: 0xD08770 }),
+    yellow: new THREE.MeshStandardMaterial({ color: 0xEBCB8B }),
+    darkGrey: new THREE.MeshStandardMaterial({ color: 0x4C566A }),
+    flash: new THREE.MeshBasicMaterial({ color: 0xEBCB8B, transparent: true, opacity: 0.8 })
+};
+
+function createExplosion(pos, blockColor, scale = 1.0) {
     // 1. Flash
-    const flashGeo = new THREE.BoxGeometry(15, 15, 15);
-    const flashMat = new THREE.MeshBasicMaterial({ color: 0xEBCB8B, transparent: true, opacity: 0.8 });
-    const flash = new THREE.Mesh(flashGeo, flashMat);
+    const flashGeo = new THREE.BoxGeometry(15 * scale, 15 * scale, 15 * scale);
+    const flash = new THREE.Mesh(flashGeo, particleMaterials.flash);
     flash.position.copy(pos);
     flash.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
     flash.userData = { velocity: new THREE.Vector3(0,0,0), life: 0.2, noGravity: true };
@@ -1831,28 +1938,39 @@ function createExplosion(pos, blockColor) {
     particles.push(flash);
 
     // 2. Debris (Red, Orange, Yellow, and Block Color)
-    const colors = [
-        new THREE.Color(0xBF616A), // Red
-        new THREE.Color(0xD08770), // Orange
-        new THREE.Color(0xEBCB8B), // Yellow
-        blockColor || new THREE.Color(0x4C566A) // Original or Dark Grey
-    ];
+    const keys = ['red', 'orange', 'yellow', 'darkGrey'];
+    const debrisCount = Math.floor(20 * scale);
 
-    for (let i = 0; i < 20; i++) {
-        const pColor = colors[Math.floor(Math.random() * colors.length)];
-        const material = new THREE.MeshStandardMaterial({ color: pColor });
+    for (let i = 0; i < debrisCount; i++) {
+        let material;
+        if (blockColor) {
+             // If it's a custom block color, we might still need a new material, 
+             // but we can try to map it or just create it (less frequent than standard debris)
+             // For now, let's just mix in standard debris to save perfs
+             if (Math.random() > 0.5) {
+                 material = new THREE.MeshStandardMaterial({ color: blockColor });
+             } else {
+                 material = particleMaterials[keys[Math.floor(Math.random() * keys.length)]];
+             }
+        } else {
+            material = particleMaterials[keys[Math.floor(Math.random() * keys.length)]];
+        }
+
         const particle = new THREE.Mesh(particleGeo, material);
         
+        // Scale debris size too
+        particle.scale.setScalar(scale);
+
         particle.position.copy(pos).add(new THREE.Vector3(
-            (Math.random() - 0.5) * 4,
-            (Math.random() - 0.5) * 4,
-            (Math.random() - 0.5) * 4
+            (Math.random() - 0.5) * 4 * scale,
+            (Math.random() - 0.5) * 4 * scale,
+            (Math.random() - 0.5) * 4 * scale
         ));
         
         const velocity = new THREE.Vector3(
-            (Math.random() - 0.5) * 30,
-            (Math.random() * 30) + 10,
-            (Math.random() - 0.5) * 30
+            (Math.random() - 0.5) * 30 * scale,
+            (Math.random() * 30 * scale) + 10 * scale,
+            (Math.random() - 0.5) * 30 * scale
         );
         
         particle.userData = { velocity: velocity, life: 1.0 + Math.random() };
@@ -1861,25 +1979,22 @@ function createExplosion(pos, blockColor) {
     }
 
     // 3. Smoke
-    for (let i = 0; i < 10; i++) {
+    const smokeCount = Math.floor(10 * scale);
+    for (let i = 0; i < smokeCount; i++) {
         const smokePos = pos.clone().add(new THREE.Vector3(
-            (Math.random() - 0.5) * 5,
-            Math.random() * 5,
-            (Math.random() - 0.5) * 5
+            (Math.random() - 0.5) * 5 * scale,
+            Math.random() * 5 * scale,
+            (Math.random() - 0.5) * 5 * scale
         ));
         createExhaust(smokePos);
     }
 }
 
 function createRicochet(pos, incomingVelocity) {
-    const nordRed = new THREE.Color(0xBF616A);
-    const nordYellow = new THREE.Color(0xEBCB8B);
-    
     const baseDir = incomingVelocity.clone().normalize().negate();
 
     for (let i = 0; i < 4; i++) {
-        const pColor = Math.random() > 0.5 ? nordRed : nordYellow;
-        const material = new THREE.MeshStandardMaterial({ color: pColor });
+        const material = Math.random() > 0.5 ? particleMaterials.red : particleMaterials.yellow;
         const particle = new THREE.Mesh(particleGeo, material);
         
         particle.position.copy(pos);
@@ -1904,7 +2019,14 @@ function updateParticles(delta) {
         if (p.userData.life <= 0) {
             scene.remove(p);
             particles.splice(i, 1);
-            p.material.dispose();
+            // Do NOT dispose shared materials!
+            if (p.material.uuid !== particleMaterials.red.uuid && 
+                p.material.uuid !== particleMaterials.orange.uuid &&
+                p.material.uuid !== particleMaterials.yellow.uuid &&
+                p.material.uuid !== particleMaterials.darkGrey.uuid &&
+                p.material.uuid !== particleMaterials.flash.uuid) {
+                    p.material.dispose();
+            }
             continue;
         }
         
@@ -1953,17 +2075,16 @@ function updateSmokeEmitters(delta) {
             emitter.timer = 0;
             
             // Create a larger, darker smoke particle
-            const mat = exhaustMat.clone();
-            mat.opacity = 0.3; // More transparent
-
-            const smoke = new THREE.Mesh(exhaustGeo, mat);
+            // Use shared material!
+            const smoke = new THREE.Mesh(exhaustGeo, exhaustMat);
             smoke.position.copy(emitter.pos);
             
             // Random offset at base
             smoke.position.x += (Math.random() - 0.5) * 1.0;
             smoke.position.z += (Math.random() - 0.5) * 1.0;
             
-            smoke.scale.setScalar(2.0 + Math.random() * 2.0); // Bigger
+            const startScale = 2.0 + Math.random() * 2.0;
+            smoke.scale.setScalar(startScale); 
             
             smoke.userData = {
                 velocity: new THREE.Vector3(
@@ -1972,6 +2093,8 @@ function updateSmokeEmitters(delta) {
                     (Math.random() - 0.5) * 2.0
                 ),
                 life: 0.8 + Math.random() * 0.5, // Dissipate quickly
+                maxLife: 1.3, // Store max life for scaling
+                startScale: startScale,
                 drag: 0.5
             };
             
@@ -1982,20 +2105,24 @@ function updateSmokeEmitters(delta) {
 }
 
 function createExhaust(pos) {
-    const mesh = new THREE.Mesh(exhaustGeo, exhaustMat.clone());
+    // Use shared material!
+    const mesh = new THREE.Mesh(exhaustGeo, exhaustMat);
     mesh.position.copy(pos);
     
     // Random offset
     mesh.position.x += (Math.random() - 0.5) * 0.2;
     mesh.position.z += (Math.random() - 0.5) * 0.2;
     
+    const life = 1.0 + Math.random() * 0.5;
     mesh.userData = {
         velocity: new THREE.Vector3(
             (Math.random() - 0.5) * 0.5,
             Math.random() * 2 + 1,
             (Math.random() - 0.5) * 0.5
         ),
-        life: 1.0 + Math.random() * 0.5
+        life: life,
+        maxLife: life,
+        startScale: 1.0
     };
     
     scene.add(mesh);
@@ -2009,7 +2136,7 @@ function updateExhaust(delta) {
         
         if (p.userData.life <= 0) {
             scene.remove(p);
-            p.material.dispose();
+            // Do NOT dispose shared material
             exhaustParticles.splice(i, 1);
             continue;
         }
@@ -2020,15 +2147,19 @@ function updateExhaust(delta) {
             p.userData.velocity.multiplyScalar(Math.max(0, 1 - p.userData.drag * delta));
         }
 
-        p.material.opacity = (p.userData.life / 1.5) * 0.6;
+        // Scale down to simulate fading
+        // Instead of opacity, we shrink it to 0
+        const lifeRatio = p.userData.life / p.userData.maxLife;
+        const scale = p.userData.startScale * lifeRatio;
+        p.scale.setScalar(scale);
     }
 }
 
 function createMuzzleFlash(pos, dir) {
     // Flash
     const flashGeo = new THREE.BoxGeometry(12.0, 12.0, 12.0);
-    const flashMat = new THREE.MeshBasicMaterial({ color: 0xEBCB8B, transparent: true, opacity: 0.9 });
-    const flash = new THREE.Mesh(flashGeo, flashMat);
+    // Use shared material!
+    const flash = new THREE.Mesh(flashGeo, particleMaterials.flash);
     flash.position.copy(pos);
     flash.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
     flash.userData = { velocity: new THREE.Vector3(0,0,0), life: 0.15, noGravity: true };
@@ -2498,6 +2629,7 @@ function animate() {
     updateSmokeEmitters(delta);
     updateTrackMarks(delta);
     spawnTrackMarks(tank);
+    updateTraffic();
 
     // Recoil Physics
     if (recoilVelocity.lengthSq() > 0.1) {
@@ -2563,9 +2695,15 @@ function animate() {
         let moveAmount = 0;
         let rotationAmount = 0;
 
-        // Activity Cycle: 3s Active, 1s Idle (75% Active)
+        // Activity Cycle: Dynamic based on kills
+        // Base: 3s Active, 1s Idle.
+        // Every 10 kills, reduce idle time by 0.2s.
+        const idleReduction = Math.floor(killCount / 10) * 0.2;
+        const idleTime = Math.max(0, 1.0 - idleReduction);
+        const activeTime = 4.0 - idleTime; // Cycle length stays 4
+
         const isAlerted = now < enemy.alertedUntil;
-        const isActive = isAlerted || ((now + (enemy.offset || 0)) % 4) < 3;
+        const isActive = isAlerted || ((now + (enemy.offset || 0)) % 4) < activeTime;
         const isFar = dist > RADAR_RANGE;
 
         if (isFar || (isActive && dist > 6)) { 
@@ -2611,8 +2749,12 @@ function animate() {
             while (diffToPath < -Math.PI) diffToPath += Math.PI * 2;
             
             // Check Blind Spot (Based on Player position)
+            // Dynamic Blind Spot: Base vision +/- 1.0 rad (~60 deg). Widens by 0.2 rad every 10 kills.
+            const visionWidening = Math.floor(killCount / 10) * 0.2;
+            const visionThreshold = Math.min(Math.PI, 1.0 + visionWidening);
+
             let canSee = true;
-            if (!isFar && !isAlerted && enemy.hasBlindSpot && Math.abs(diffToPlayer) > 1.0) {
+            if (!isFar && !isAlerted && enemy.hasBlindSpot && Math.abs(diffToPlayer) > visionThreshold) {
                 canSee = false;
             }
 
@@ -2969,7 +3111,7 @@ function animate() {
                 });
             }
 
-            const { mesh, index, parts } = voxelMap.get(key);
+            const { mesh, index, parts, relatedKeys } = voxelMap.get(key);
             
             // Explosion Effect
             const color = new THREE.Color();
@@ -3010,7 +3152,13 @@ function animate() {
             if (parts) {
                 parts.forEach(p => unregisterInstance(p.mesh, p.index));
             }
-            voxelMap.delete(key);
+            
+            if (relatedKeys) {
+                relatedKeys.forEach(k => voxelMap.delete(k));
+            } else {
+                voxelMap.delete(key);
+            }
+            
             updateHeightMap(gx, gz);
 
             // Remove projectile
@@ -3077,7 +3225,7 @@ function animate() {
                 for (let j = civilians.length - 1; j >= 0; j--) {
                     const civ = civilians[j];
                     if (p.position.distanceTo(civ.mesh.position) < 4) {
-                        createExplosion(civ.mesh.position, civ.color);
+                        createExplosion(civ.mesh.position, civ.color, 0.3);
                         
                         // Persistent Smoke Emitter (3 seconds)
                         createSmokeEmitter(civ.mesh.position, 3.0);
