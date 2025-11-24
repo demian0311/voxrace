@@ -20,11 +20,11 @@ let gameStartTime = 0;
 
 // --- Scene Setup ---
 const scene = new THREE.Scene();
-const HORIZON_COLOR = 0xE5E9F0; // Nord5 (Snow)
+const HORIZON_COLOR = 0xD8DEE9; // Nord4 (Snow Storm)
 const SKY_COLOR = 0x88C0D0; // Nord8 (Frost)
-const FOG_COLOR = 0xE5E9F0; // Nord5 (Snow)
+const FOG_COLOR = 0xD8DEE9; // Nord4 (Snow Storm)
 
-scene.fog = new THREE.FogExp2(FOG_COLOR, 0.005);
+scene.fog = new THREE.FogExp2(FOG_COLOR, 0.002);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 5000);
 camera.position.set(0, 20, 30);
@@ -107,15 +107,18 @@ function updateRadar() {
         const distFromCenter = Math.sqrt(dx*dx + dy*dy);
         const maxRadius = width * 0.45; 
 
+        let dotRadius = 5;
+
         if (distFromCenter > maxRadius) {
             const angle = Math.atan2(dy, dx);
             px = cx + Math.cos(angle) * maxRadius;
             py = cy + Math.sin(angle) * maxRadius;
+            dotRadius = 2; // Small dot for off-radar
         }
         
         radarCtx.fillStyle = '#BF616A'; // Nord11
         radarCtx.beginPath();
-        radarCtx.arc(px, py, 5, 0, Math.PI * 2);
+        radarCtx.arc(px, py, dotRadius, 0, Math.PI * 2);
         radarCtx.fill();
 
         // Enemy Firing Indicator
@@ -366,6 +369,133 @@ const skyMat = new THREE.ShaderMaterial({
 });
 const sky = new THREE.Mesh(skyGeo, skyMat);
 scene.add(sky);
+
+// --- Clouds ---
+const cloudVertexShader = `
+varying vec2 vUv;
+void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}`;
+
+const cloudFragmentShader = `
+uniform float uTime;
+uniform vec3 uCloudColor;
+varying vec2 vUv;
+
+// Simplex 3D Noise 
+vec3 permute(vec3 x) { return mod(((x*34.0)+1.0)*x, 289.0); }
+vec4 permute(vec4 x) { return mod(((x*34.0)+1.0)*x, 289.0); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+float snoise(vec3 v){ 
+  const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
+  const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+
+  vec3 i  = floor(v + dot(v, C.yyy) );
+  vec3 x0 = v - i + dot(i, C.xxx) ;
+
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min( g.xyz, l.zxy );
+  vec3 i2 = max( g.xyz, l.zxy );
+
+  vec3 x1 = x0 - i1 + 1.0 * C.xxx;
+  vec3 x2 = x0 - i2 + 2.0 * C.xxx;
+  vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
+
+  i = mod(i, 289.0 ); 
+  vec4 p = permute( permute( permute( 
+             i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+           + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) 
+           + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+
+  float n_ = 1.0/7.0;
+  vec3  ns = n_ * D.wyz - D.xzx;
+
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_ );
+
+  vec4 x = x_ *ns.x + ns.yyyy;
+  vec4 y = y_ *ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+
+  vec4 b0 = vec4( x.xy, y.xy );
+  vec4 b1 = vec4( x.zw, y.zw );
+
+  vec4 s0 = floor(b0)*2.0 + 1.0;
+  vec4 s1 = floor(b1)*2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+
+  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+  vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+
+  vec3 p0 = vec3(a0.xy,h.x);
+  vec3 p1 = vec3(a0.zw,h.y);
+  vec3 p2 = vec3(a1.xy,h.z);
+  vec3 p3 = vec3(a1.zw,h.w);
+
+  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+  p0 *= norm.x;
+  p1 *= norm.y;
+  p2 *= norm.z;
+  p3 *= norm.w;
+
+  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), 
+                                dot(p2,x2), dot(p3,x3) ) );
+}
+
+void main() {
+    float time = uTime * 0.05;
+    vec2 uv = vUv;
+    
+    // Seamless wrapping on X axis using cylindrical coordinates
+    float theta = uv.x * 6.283185; // 2 * PI
+    
+    // Layer 1
+    // We map x to angle, y to height.
+    // To get striations (horizontal stretch), we scale the Y coordinate more than the circle radius.
+    // Radius 2.0, Y scale 10.0
+    vec3 p1 = vec3(cos(theta + time) * 2.0, uv.y * 10.0, sin(theta + time) * 2.0);
+    float n1 = snoise(p1);
+    
+    // Layer 2
+    // Different scale and speed
+    vec3 p2 = vec3(cos(theta - time * 0.5) * 3.0, uv.y * 20.0, sin(theta - time * 0.5) * 3.0);
+    float n2 = snoise(p2);
+    
+    float noise = n1 * 0.6 + n2 * 0.4;
+    
+    // Map noise to alpha
+    float alpha = smoothstep(0.0, 0.6, noise);
+    
+    // Fade at horizon (bottom of sphere) and zenith (top)
+    // uv.y goes from 0 (bottom) to 1 (top)
+    float fade = smoothstep(0.0, 0.3, uv.y) * (1.0 - smoothstep(0.6, 1.0, uv.y));
+    
+    alpha *= fade * 0.5; // Max opacity 0.5
+    
+    gl_FragColor = vec4(uCloudColor, alpha);
+}`;
+
+const cloudGeo = new THREE.SphereGeometry(3000, 64, 32);
+const cloudMat = new THREE.ShaderMaterial({
+    uniforms: {
+        uTime: { value: 0 },
+        uCloudColor: { value: new THREE.Color(0xD8DEE9) } // Nord4 (Snow Storm)
+    },
+    vertexShader: cloudVertexShader,
+    fragmentShader: cloudFragmentShader,
+    side: THREE.BackSide,
+    transparent: true,
+    depthWrite: false
+});
+const cloudMesh = new THREE.Mesh(cloudGeo, cloudMat);
+scene.add(cloudMesh);
 
 // --- Lights ---
 const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -1806,6 +1936,43 @@ function createMuzzleFlash(pos, dir) {
     flash.userData = { velocity: new THREE.Vector3(0,0,0), life: 0.15, noGravity: true };
     scene.add(flash);
     particles.push(flash);
+
+    // Big Smoke Effect
+    const smokeCount = 8;
+    const smokeMat = new THREE.MeshBasicMaterial({ color: 0x4C566A, transparent: true, opacity: 0.4 }); // Nord3 (Lighter Grey)
+
+    for (let i = 0; i < smokeCount; i++) {
+        const smoke = new THREE.Mesh(exhaustGeo, smokeMat.clone());
+        
+        smoke.position.copy(pos);
+        // Random offset at source
+        smoke.position.add(new THREE.Vector3(
+            (Math.random() - 0.5) * 0.5,
+            (Math.random() - 0.5) * 0.5,
+            (Math.random() - 0.5) * 0.5
+        ));
+
+        // Smaller scale
+        const scale = 2.0 + Math.random() * 3.0;
+        smoke.scale.setScalar(scale);
+
+        // Velocity: Forward with spread
+        const velocity = dir.clone().multiplyScalar(5 + Math.random() * 5);
+        velocity.add(new THREE.Vector3(
+            (Math.random() - 0.5) * 3,
+            (Math.random() - 0.5) * 3,
+            (Math.random() - 0.5) * 3
+        ));
+
+        smoke.userData = {
+            velocity: velocity,
+            life: 0.4 + Math.random() * 0.4,
+            drag: 5.0 // Slow down very quickly
+        };
+        
+        scene.add(smoke);
+        exhaustParticles.push(smoke);
+    }
 }
 
 // --- Touch Controls ---
@@ -2010,9 +2177,22 @@ function spawnReinforcements(count = 2) {
                 const gx = Math.round(x / VOXEL_SIZE);
                 const gz = Math.round(z / VOXEL_SIZE);
                 
-                // Double check no block above
-                const hillKey = getVoxelKey(gx, 1, gz);
-                if (!voxelMap.has(hillKey)) {
+                // Check 3x3 area for clearance (same as chunk generation)
+                let clear = true;
+                for(let dx = -1; dx <= 1; dx++) {
+                    for(let dz = -1; dz <= 1; dz++) {
+                        const key = `${gx+dx},${gz+dz}`;
+                        const neighborH = heightMap[key];
+                        // Must be explicitly 0 (ground level). Undefined means unknown/not generated -> unsafe.
+                        if (neighborH !== 0) {
+                            clear = false;
+                            break;
+                        }
+                    }
+                    if(!clear) break;
+                }
+
+                if (clear) {
                     const pos = new THREE.Vector3(gx * VOXEL_SIZE, 0, gz * VOXEL_SIZE);
                     createEnemyTank(pos);
                     break;
@@ -2165,6 +2345,8 @@ function animate() {
 
     // Sky follows tank
     sky.position.copy(tank.mesh.position);
+    cloudMesh.position.copy(tank.mesh.position);
+    cloudMat.uniforms.uTime.value = now;
 
     // Light follows tank
     dirLight.position.set(tank.mesh.position.x + 50, tank.mesh.position.y + 100, tank.mesh.position.z + 50);
@@ -2272,43 +2454,69 @@ function animate() {
         if (isFar || (isActive && dist > 6)) { 
             toPlayer.normalize();
             
-            // Calculate angle to player
-            const localForward = new THREE.Vector3(0, 0, -1);
-            localForward.applyQuaternion(enemy.mesh.quaternion);
+            // 1. Navigation / Obstacle Avoidance
+            let targetDir = toPlayer.clone();
             
-            const angleToTarget = Math.atan2(toPlayer.x, toPlayer.z);
-            const currentAngle = Math.atan2(localForward.x, localForward.z);
+            // Helper: Check if moving in 'dir' is blocked
+            const checkDir = (dir) => {
+                const lookAhead = 5.0;
+                const testPos = enemy.mesh.position.clone().addScaledVector(dir, lookAhead);
+                return checkEnvironmentCollision(testPos, enemy.mesh.quaternion);
+            };
+
+            // If direct path blocked, scan for open directions
+            if (checkDir(targetDir)) {
+                const angles = [30, -30, 60, -60, 90, -90];
+                for (const a of angles) {
+                    const rad = THREE.MathUtils.degToRad(a);
+                    const testDir = toPlayer.clone().applyAxisAngle(new THREE.Vector3(0,1,0), rad);
+                    if (!checkDir(testDir)) {
+                        targetDir = testDir;
+                        break;
+                    }
+                }
+            }
+
+            // Calculate angles
+            const enemyForward = new THREE.Vector3(0, 0, -1).applyQuaternion(enemy.mesh.quaternion);
+            const currentAngle = Math.atan2(enemyForward.x, enemyForward.z);
             
-            let diff = angleToTarget - currentAngle;
-            while (diff > Math.PI) diff -= Math.PI * 2;
-            while (diff < -Math.PI) diff += Math.PI * 2;
+            // Angle to Player (for Blind Spot & Shooting)
+            const angleToPlayer = Math.atan2(toPlayer.x, toPlayer.z);
+            let diffToPlayer = angleToPlayer - currentAngle;
+            while (diffToPlayer > Math.PI) diffToPlayer -= Math.PI * 2;
+            while (diffToPlayer < -Math.PI) diffToPlayer += Math.PI * 2;
+
+            // Angle to Target Path (for Movement)
+            const angleToPath = Math.atan2(targetDir.x, targetDir.z);
+            let diffToPath = angleToPath - currentAngle;
+            while (diffToPath > Math.PI) diffToPath -= Math.PI * 2;
+            while (diffToPath < -Math.PI) diffToPath += Math.PI * 2;
             
-            // Check Blind Spot
-            // If hasBlindSpot is true, only engage if player is within ~60 degrees (approx 1.0 radian)
-            // Ignore blind spot if far away (force pursue) or alerted
+            // Check Blind Spot (Based on Player position)
             let canSee = true;
-            if (!isFar && !isAlerted && enemy.hasBlindSpot && Math.abs(diff) > 1.0) {
+            if (!isFar && !isAlerted && enemy.hasBlindSpot && Math.abs(diffToPlayer) > 1.0) {
                 canSee = false;
             }
 
-            // Always turn towards player if seen
-            if (canSee && Math.abs(diff) > 0.1) {
-                rotationAmount = Math.sign(diff) * TANK_ROTATION_SPEED * delta;
-                if (Math.abs(rotationAmount) > Math.abs(diff)) rotationAmount = diff;
+            // Turn towards Path
+            if (canSee && Math.abs(diffToPath) > 0.1) {
+                rotationAmount = Math.sign(diffToPath) * TANK_ROTATION_SPEED * delta;
+                if (Math.abs(rotationAmount) > Math.abs(diffToPath)) rotationAmount = diffToPath;
                 enemy.mesh.rotateY(rotationAmount);
             }
 
             // Flash if aiming at player
-            if (canSee && Math.abs(diff) < 0.3) {
+            if (canSee && Math.abs(diffToPlayer) < 0.3) {
                 const flash = (Math.sin(now * 20) + 1) / 2;
-                enemy.turretMat.emissive.setHex(0xD08770); // Nord12 (Orange - closer to Red)
+                enemy.turretMat.emissive.setHex(0xD08770); // Nord12
                 enemy.turretMat.emissiveIntensity = flash * 0.5;
             } else {
                 enemy.turretMat.emissiveIntensity = 0;
             }
             
-            // Move if roughly facing (widened angle slightly)
-            if (canSee && Math.abs(diff) < 0.5) {
+            // Move if roughly facing Path
+            if (canSee && Math.abs(diffToPath) < 0.5) {
                 moveAmount = ENEMY_SPEED * delta;
                 const direction = new THREE.Vector3(0, 0, -1);
                 direction.applyQuaternion(enemy.mesh.quaternion);
@@ -2318,8 +2526,8 @@ function animate() {
                     enemy.mesh.position.copy(targetPos);
                 }
 
-                // Shoot if facing player
-                if (Math.abs(diff) < 0.1) {
+                // Shoot if facing player (not just path)
+                if (Math.abs(diffToPlayer) < 0.1) {
                     enemyShoot(enemy);
                 }
 
@@ -2683,7 +2891,15 @@ function animate() {
                 const enemy = enemies[j];
                 // Use a raised center point for collision to account for tank height
                 const enemyCenter = enemy.mesh.position.clone().add(new THREE.Vector3(0, 2, 0));
-                if (p.position.distanceTo(enemyCenter) < 3.5) {
+                
+                const dist = p.position.distanceTo(enemyCenter);
+
+                // Near Miss Alert (5 units)
+                if (dist < 5.0) {
+                    enemy.alertedUntil = clock.getElapsedTime() + 10;
+                }
+
+                if (dist < 3.5) {
                     createExplosion(enemy.mesh.position, new THREE.Color(0xBF616A)); // Red explosion
                     
                     // Death Smoke
