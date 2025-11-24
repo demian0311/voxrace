@@ -45,8 +45,8 @@ radarCanvas.style.left = '20px';
 radarCanvas.style.width = '150px';
 radarCanvas.style.height = '150px';
 radarCanvas.style.borderRadius = '50%';
-radarCanvas.style.backgroundColor = 'rgba(46, 52, 64, 0.8)'; // Nord0
-radarCanvas.style.border = '2px solid #88C0D0'; // Nord8
+radarCanvas.style.backgroundColor = 'rgba(46, 52, 64, 0.5)'; // Nord0
+radarCanvas.style.border = '2px solid rgba(136, 192, 208, 0.6)'; // Nord8 transparent
 document.body.appendChild(radarCanvas);
 
 const radarCtx = radarCanvas.getContext('2d');
@@ -257,11 +257,9 @@ function updateHealthUI() {
     if (tank.healthLights) {
         tank.healthLights.forEach((light, i) => {
             if (i < tank.health) {
-                if (tank.health > 3) light.material.color.setHex(0xA3BE8C); // Green
-                else if (tank.health > 1) light.material.color.setHex(0xEBCB8B); // Yellow
-                else light.material.color.setHex(0xBF616A); // Red
+                light.material.color.setHex(0xA3BE8C); // Green (Healthy)
             } else {
-                light.material.color.setHex(0x2E3440); // Off (Dark Grey)
+                light.material.color.setHex(0xBF616A); // Red (Damaged)
             }
         });
     }
@@ -706,14 +704,35 @@ function createEnemyTank(pos) {
     const rightTrackTexture = createTrackTexture();
     const trackGeo = new THREE.BoxGeometry(1, 1.5, 6.5);
     
-    const leftTrackMat = new THREE.MeshStandardMaterial({ map: leftTrackTexture });
-    const leftTrack = new THREE.Mesh(trackGeo, leftTrackMat);
+    // Dark solid material for the sides (no texture)
+    const sideTrackMat = new THREE.MeshStandardMaterial({ color: 0x15191F }); // Darker Nord0
+    
+    // Textured material for the treads
+    const leftTreadMat = new THREE.MeshStandardMaterial({ map: leftTrackTexture });
+    const rightTreadMat = new THREE.MeshStandardMaterial({ map: rightTrackTexture });
+
+    const leftTrackMaterials = [
+        sideTrackMat, // Right (Inner)
+        sideTrackMat, // Left (Outer)
+        leftTreadMat, // Top
+        leftTreadMat, // Bottom
+        leftTreadMat, // Front
+        leftTreadMat  // Back
+    ];
+    const leftTrack = new THREE.Mesh(trackGeo, leftTrackMaterials);
     leftTrack.position.set(-2.2, 0.75, 0);
     leftTrack.castShadow = true;
     innerGroup.add(leftTrack);
 
-    const rightTrackMat = new THREE.MeshStandardMaterial({ map: rightTrackTexture });
-    const rightTrack = new THREE.Mesh(trackGeo, rightTrackMat);
+    const rightTrackMaterials = [
+        sideTrackMat, // Right (Outer)
+        sideTrackMat, // Left (Inner)
+        rightTreadMat, // Top
+        rightTreadMat, // Bottom
+        rightTreadMat, // Front
+        rightTreadMat  // Back
+    ];
+    const rightTrack = new THREE.Mesh(trackGeo, rightTrackMaterials);
     rightTrack.position.set(2.2, 0.75, 0);
     rightTrack.castShadow = true;
     innerGroup.add(rightTrack);
@@ -743,7 +762,8 @@ function createEnemyTank(pos) {
         turretMat: turretMat,
         offset: Math.random() * 4, // Random offset for activity cycle
         hasBlindSpot: Math.random() < 0.9, // 90% chance to have a blind spot
-        alertedUntil: 0
+        alertedUntil: 0,
+        landedTime: null // Track when they hit the ground
     });
 }
 
@@ -1461,14 +1481,34 @@ function createTank() {
     
     const trackGeo = new THREE.BoxGeometry(1, 1.5, 6.5);
     
-    const leftTrackMat = new THREE.MeshStandardMaterial({ map: leftTrackTexture });
-    const leftTrack = new THREE.Mesh(trackGeo, leftTrackMat);
+    // Dark solid material for the sides (no texture)
+    const sideTrackMat = new THREE.MeshStandardMaterial({ color: 0x15191F }); // Darker Nord0
+    
+    const leftTreadMat = new THREE.MeshStandardMaterial({ map: leftTrackTexture });
+    const rightTreadMat = new THREE.MeshStandardMaterial({ map: rightTrackTexture });
+
+    const leftTrackMaterials = [
+        sideTrackMat, // Right (Inner)
+        sideTrackMat, // Left (Outer)
+        leftTreadMat, // Top
+        leftTreadMat, // Bottom
+        leftTreadMat, // Front
+        leftTreadMat  // Back
+    ];
+    const leftTrack = new THREE.Mesh(trackGeo, leftTrackMaterials);
     leftTrack.position.set(-2.2, 0.75, 0);
     leftTrack.castShadow = true;
     innerGroup.add(leftTrack);
 
-    const rightTrackMat = new THREE.MeshStandardMaterial({ map: rightTrackTexture });
-    const rightTrack = new THREE.Mesh(trackGeo, rightTrackMat);
+    const rightTrackMaterials = [
+        sideTrackMat, // Right (Outer)
+        sideTrackMat, // Left (Inner)
+        rightTreadMat, // Top
+        rightTreadMat, // Bottom
+        rightTreadMat, // Front
+        rightTreadMat  // Back
+    ];
+    const rightTrack = new THREE.Mesh(trackGeo, rightTrackMaterials);
     rightTrack.position.set(2.2, 0.75, 0);
     rightTrack.castShadow = true;
     innerGroup.add(rightTrack);
@@ -1580,7 +1620,7 @@ function restartGame() {
 
     // Reset Tank
     tank.health = MAX_HEALTH;
-    tank.mesh.position.set(25, 0, 25); // Start at center of chunk (0,0), which is a road intersection
+    tank.mesh.position.set(25, 100, 25); // Drop from sky
     tank.mesh.rotation.set(0, 0, 0);
     tank.innerMesh.rotation.set(0, 0, 0);
     tank.currentSpeed = 0;
@@ -1738,6 +1778,10 @@ function triggerDirectionalFlash(sourcePos) {
 function enemyShoot(enemy) {
     const now = clock.getElapsedTime();
     if (now - gameStartTime < 5) return; // 5 second grace period
+    
+    // Wait 3 seconds after landing before shooting
+    if (!enemy.landedTime || now - enemy.landedTime < 3.0) return;
+
     if (now - enemy.lastFireTime < ENEMY_FIRE_COOLDOWN) return;
     
     enemy.lastFireTime = now;
@@ -1882,6 +1926,60 @@ function updateParticles(delta) {
 const exhaustParticles = [];
 const exhaustGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
 const exhaustMat = new THREE.MeshBasicMaterial({ color: 0x2E3440, transparent: true, opacity: 0.6 });
+
+const smokeEmitters = [];
+
+function createSmokeEmitter(pos, duration) {
+    smokeEmitters.push({
+        pos: pos.clone(),
+        duration: duration,
+        timer: 0
+    });
+}
+
+function updateSmokeEmitters(delta) {
+    for (let i = smokeEmitters.length - 1; i >= 0; i--) {
+        const emitter = smokeEmitters[i];
+        emitter.duration -= delta;
+        
+        if (emitter.duration <= 0) {
+            smokeEmitters.splice(i, 1);
+            continue;
+        }
+        
+        emitter.timer += delta;
+        // Spawn smoke every 0.15s (Less dense)
+        if (emitter.timer > 0.15) {
+            emitter.timer = 0;
+            
+            // Create a larger, darker smoke particle
+            const mat = exhaustMat.clone();
+            mat.opacity = 0.3; // More transparent
+
+            const smoke = new THREE.Mesh(exhaustGeo, mat);
+            smoke.position.copy(emitter.pos);
+            
+            // Random offset at base
+            smoke.position.x += (Math.random() - 0.5) * 1.0;
+            smoke.position.z += (Math.random() - 0.5) * 1.0;
+            
+            smoke.scale.setScalar(2.0 + Math.random() * 2.0); // Bigger
+            
+            smoke.userData = {
+                velocity: new THREE.Vector3(
+                    (Math.random() - 0.5) * 2.0, // Drift
+                    Math.random() * 5 + 2,       // Rise fast
+                    (Math.random() - 0.5) * 2.0
+                ),
+                life: 0.8 + Math.random() * 0.5, // Dissipate quickly
+                drag: 0.5
+            };
+            
+            scene.add(smoke);
+            exhaustParticles.push(smoke);
+        }
+    }
+}
 
 function createExhaust(pos) {
     const mesh = new THREE.Mesh(exhaustGeo, exhaustMat.clone());
@@ -2193,7 +2291,7 @@ function spawnReinforcements(count = 2) {
                 }
 
                 if (clear) {
-                    const pos = new THREE.Vector3(gx * VOXEL_SIZE, 0, gz * VOXEL_SIZE);
+                    const pos = new THREE.Vector3(gx * VOXEL_SIZE, 100, gz * VOXEL_SIZE); // Drop from sky
                     createEnemyTank(pos);
                     break;
                 }
@@ -2339,8 +2437,26 @@ function animate() {
     const now = clock.getElapsedTime();
     
     // Update Indicator (Barrel Color)
-    if (now - lastFireTime >= FIRE_COOLDOWN) {
-        tank.barrel.material.color.setHex(0x88C0D0); // Nord8 (Original Blue/Ready)
+    // Gradual cooldown: Red -> Purple -> Blue
+    const timeSinceFire = now - lastFireTime;
+    if (timeSinceFire < FIRE_COOLDOWN) {
+        const progress = timeSinceFire / FIRE_COOLDOWN;
+        
+        const red = new THREE.Color(0xBF616A);    // Nord11 (Hot)
+        const purple = new THREE.Color(0xB48EAD); // Nord15 (Cooling)
+        const blue = new THREE.Color(0x88C0D0);   // Nord8 (Ready)
+        
+        if (progress < 0.5) {
+            // Red to Purple
+            const t = progress * 2;
+            tank.barrel.material.color.copy(red).lerp(purple, t);
+        } else {
+            // Purple to Blue
+            const t = (progress - 0.5) * 2;
+            tank.barrel.material.color.copy(purple).lerp(blue, t);
+        }
+    } else {
+        tank.barrel.material.color.setHex(0x88C0D0); // Nord8 (Ready)
     }
 
     // Sky follows tank
@@ -2379,6 +2495,7 @@ function animate() {
     updateRadar();
     updateParticles(delta);
     updateExhaust(delta);
+    updateSmokeEmitters(delta);
     updateTrackMarks(delta);
     spawnTrackMarks(tank);
 
@@ -2558,9 +2675,26 @@ function animate() {
         
         // Gravity
         const h = getTerrainHeight(enemy.mesh.position.x, enemy.mesh.position.z);
-        if (h > -50) {
+        
+        if (enemy.mesh.position.y > h + 0.5) {
+            // Freefall
+            enemy.mesh.position.y -= 40 * delta;
+            
+            // Landing
+            if (enemy.mesh.position.y <= h + 0.5) {
+                enemy.mesh.position.y = h;
+                // Dust cloud on landing
+                createExplosion(enemy.mesh.position, new THREE.Color(0xD8DEE9)); 
+                
+                if (!enemy.landedTime) {
+                    enemy.landedTime = clock.getElapsedTime();
+                }
+            }
+        } else if (h > -50) {
+            // Ground following
             enemy.mesh.position.y = THREE.MathUtils.lerp(enemy.mesh.position.y, h, 0.1);
         } else {
+            // Void
             enemy.mesh.position.y -= 9.8 * delta;
         }
         
@@ -2789,8 +2923,17 @@ function animate() {
 
     const terrainHeight = bestHeight;
     
-    // Simple gravity/snap to ground
-    if (terrainHeight > -50) { // If on map
+    // Gravity / Falling
+    if (tank.mesh.position.y > terrainHeight + 0.5) {
+        // Freefall
+        tank.mesh.position.y -= 40 * delta;
+        
+        // Landing
+        if (tank.mesh.position.y <= terrainHeight + 0.5) {
+            tank.mesh.position.y = terrainHeight;
+            createExplosion(tank.mesh.position, new THREE.Color(0xD8DEE9));
+        }
+    } else if (terrainHeight > -50) { // If on map
         // Always try to stay on top of the terrain
         // If we are below the terrain (sinking) or slightly above (floating), snap to it.
         
@@ -2902,15 +3045,8 @@ function animate() {
                 if (dist < 3.5) {
                     createExplosion(enemy.mesh.position, new THREE.Color(0xBF616A)); // Red explosion
                     
-                    // Death Smoke
-                    for (let k = 0; k < 30; k++) {
-                        const smokePos = enemy.mesh.position.clone().add(new THREE.Vector3(
-                            (Math.random() - 0.5) * 4,
-                            Math.random() * 3,
-                            (Math.random() - 0.5) * 4
-                        ));
-                        createExhaust(smokePos);
-                    }
+                    // Persistent Smoke Emitter (5 seconds)
+                    createSmokeEmitter(enemy.mesh.position, 5.0);
 
                     scene.remove(enemy.mesh);
                     enemies.splice(j, 1);
@@ -2924,7 +3060,11 @@ function animate() {
                     }
 
                     updateKillCountDisplay();
-                    spawnReinforcements(2);
+                    
+                    // Dynamic difficulty: Increase spawns every 5 kills
+                    // Base 2, +1 for every 5 kills
+                    const reinforcementCount = 2 + Math.floor(killCount / 5);
+                    spawnReinforcements(reinforcementCount);
 
                     scene.remove(p);
                     projectiles.splice(i, 1);
@@ -2939,15 +3079,8 @@ function animate() {
                     if (p.position.distanceTo(civ.mesh.position) < 4) {
                         createExplosion(civ.mesh.position, civ.color);
                         
-                        // Death Smoke
-                        for (let k = 0; k < 15; k++) {
-                            const smokePos = civ.mesh.position.clone().add(new THREE.Vector3(
-                                (Math.random() - 0.5) * 4,
-                                Math.random() * 3,
-                                (Math.random() - 0.5) * 4
-                            ));
-                            createExhaust(smokePos);
-                        }
+                        // Persistent Smoke Emitter (3 seconds)
+                        createSmokeEmitter(civ.mesh.position, 3.0);
 
                         scene.remove(civ.mesh);
                         civilians.splice(j, 1);
