@@ -169,7 +169,7 @@ killCountContainer.style.pointerEvents = 'none';
 document.body.appendChild(killCountContainer);
 
 const tankIconSVG = `
-<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" opacity="0.4">
     <rect x="2" y="6" width="20" height="14" rx="2" fill="#4C566A"/>
     <rect x="5" y="4" width="14" height="14" rx="2" fill="#BF616A"/>
     <rect x="8" y="8" width="8" height="8" rx="2" fill="#2E3440"/>
@@ -673,9 +673,13 @@ function createEnemyTank(pos) {
     const innerGroup = new THREE.Group();
     tankGroup.add(innerGroup);
 
+    // Collection of materials for fading
+    const materials = [];
+
     // Body
     const bodyGeo = new THREE.BoxGeometry(4, 2, 6);
     const bodyMat = new THREE.MeshStandardMaterial({ color: 0x4C566A }); // Nord3 (Dark Grey)
+    materials.push(bodyMat);
     const body = new THREE.Mesh(bodyGeo, bodyMat);
     body.position.y = 1.5;
     body.castShadow = true;
@@ -685,6 +689,7 @@ function createEnemyTank(pos) {
     // Turret
     const turretGeo = new THREE.BoxGeometry(3, 1.5, 3);
     const turretMat = new THREE.MeshStandardMaterial({ color: 0xBF616A }); // Nord11 (Red)
+    materials.push(turretMat);
     const turret = new THREE.Mesh(turretGeo, turretMat);
     turret.position.y = 3.25;
     turret.castShadow = true;
@@ -694,6 +699,7 @@ function createEnemyTank(pos) {
     // Barrel
     const barrelGeo = new THREE.CylinderGeometry(0.3, 0.3, 5, 8);
     const barrelMat = new THREE.MeshStandardMaterial({ color: 0xBF616A }); // Nord11 (Red)
+    materials.push(barrelMat);
     const barrel = new THREE.Mesh(barrelGeo, barrelMat);
     barrel.rotation.x = Math.PI / 2;
     barrel.position.set(0, 0, -2.5);
@@ -706,10 +712,13 @@ function createEnemyTank(pos) {
     
     // Dark solid material for the sides (no texture)
     const sideTrackMat = new THREE.MeshStandardMaterial({ color: 0x15191F }); // Darker Nord0
+    materials.push(sideTrackMat);
     
     // Textured material for the treads
     const leftTreadMat = new THREE.MeshStandardMaterial({ map: leftTrackTexture });
+    materials.push(leftTreadMat);
     const rightTreadMat = new THREE.MeshStandardMaterial({ map: rightTrackTexture });
+    materials.push(rightTreadMat);
 
     const leftTrackMaterials = [
         sideTrackMat, // Right (Inner)
@@ -740,6 +749,7 @@ function createEnemyTank(pos) {
     // Mufflers
     const mufflerGeo = new THREE.CylinderGeometry(0.25, 0.25, 1.2, 8);
     const mufflerMat = new THREE.MeshStandardMaterial({ color: 0x2E3440 }); // Nord0
+    materials.push(mufflerMat);
     
     const leftMuffler = new THREE.Mesh(mufflerGeo, mufflerMat);
     leftMuffler.position.set(-1.4, 3.1, 2.2);
@@ -751,6 +761,22 @@ function createEnemyTank(pos) {
     rightMuffler.castShadow = true;
     innerGroup.add(rightMuffler);
 
+    // Initial Opacity State
+    // If spawning high up (y > 10), start transparent
+    if (pos.y > 10) {
+        materials.forEach(m => {
+            m.transparent = true;
+            m.opacity = 0;
+        });
+        // Disable shadows initially so we don't see a shadow for an invisible tank
+        tankGroup.traverse(c => {
+            if (c.isMesh) {
+                c.castShadow = false;
+                c.receiveShadow = false;
+            }
+        });
+    }
+
     scene.add(tankGroup);
     enemies.push({ 
         mesh: tankGroup, 
@@ -760,10 +786,12 @@ function createEnemyTank(pos) {
         lastTrackPos: pos.clone(),
         lastFireTime: -100, // Initialize cooldown
         turretMat: turretMat,
+        materials: materials, // Store for fading
         offset: Math.random() * 4, // Random offset for activity cycle
         hasBlindSpot: Math.random() < 0.9, // 90% chance to have a blind spot
         alertedUntil: 0,
-        landedTime: null // Track when they hit the ground
+        landedTime: null, // Track when they hit the ground
+        attackDelay: Math.random() * 3.0 // Random delay 0-3s before first attack
     });
 }
 
@@ -1079,8 +1107,8 @@ function generateChunk(cx, cz) {
     glassMesh.instanceMatrix.needsUpdate = true;
     worldGroup.add(glassMesh);
     
-    // Spawn Enemy (20% chance per chunk, but not at 0,0)
-    if ((cx !== 0 || cz !== 0) && rng() > 0.8) {
+    // Spawn Enemy (10% chance per chunk, but not at 0,0)
+    if ((cx !== 0 || cz !== 0) && rng() > 0.9) {
         const rx = Math.floor(rng() * CHUNK_SIZE);
         const rz = Math.floor(rng() * CHUNK_SIZE);
         const gx = startX + rx;
@@ -1878,8 +1906,8 @@ function enemyShoot(enemy) {
     const now = clock.getElapsedTime();
     if (now - gameStartTime < 5) return; // 5 second grace period
     
-    // Wait 3 seconds after landing before shooting
-    if (!enemy.landedTime || now - enemy.landedTime < 3.0) return;
+    // Wait random time (0-3s) after landing before shooting
+    if (!enemy.landedTime || now - enemy.landedTime < (enemy.attackDelay || 3.0)) return;
 
     if (now - enemy.lastFireTime < ENEMY_FIRE_COOLDOWN) return;
     
@@ -1942,19 +1970,8 @@ function createExplosion(pos, blockColor, scale = 1.0) {
     const debrisCount = Math.floor(20 * scale);
 
     for (let i = 0; i < debrisCount; i++) {
-        let material;
-        if (blockColor) {
-             // If it's a custom block color, we might still need a new material, 
-             // but we can try to map it or just create it (less frequent than standard debris)
-             // For now, let's just mix in standard debris to save perfs
-             if (Math.random() > 0.5) {
-                 material = new THREE.MeshStandardMaterial({ color: blockColor });
-             } else {
-                 material = particleMaterials[keys[Math.floor(Math.random() * keys.length)]];
-             }
-        } else {
-            material = particleMaterials[keys[Math.floor(Math.random() * keys.length)]];
-        }
+        // Use shared materials only to improve performance
+        const material = particleMaterials[keys[Math.floor(Math.random() * keys.length)]];
 
         const particle = new THREE.Mesh(particleGeo, material);
         
@@ -2155,6 +2172,8 @@ function updateExhaust(delta) {
     }
 }
 
+const muzzleSmokeMat = new THREE.MeshBasicMaterial({ color: 0x4C566A, transparent: true, opacity: 0.4 }); // Nord3 (Lighter Grey)
+
 function createMuzzleFlash(pos, dir) {
     // Flash
     const flashGeo = new THREE.BoxGeometry(12.0, 12.0, 12.0);
@@ -2168,10 +2187,9 @@ function createMuzzleFlash(pos, dir) {
 
     // Big Smoke Effect
     const smokeCount = 8;
-    const smokeMat = new THREE.MeshBasicMaterial({ color: 0x4C566A, transparent: true, opacity: 0.4 }); // Nord3 (Lighter Grey)
-
+    
     for (let i = 0; i < smokeCount; i++) {
-        const smoke = new THREE.Mesh(exhaustGeo, smokeMat.clone());
+        const smoke = new THREE.Mesh(exhaustGeo, muzzleSmokeMat);
         
         smoke.position.copy(pos);
         // Random offset at source
@@ -2391,10 +2409,16 @@ window.addEventListener('keyup', (e) => {
 });
 
 function spawnReinforcements(count = 2) {
-    for (let i = 0; i < count; i++) {
+    // Cap the number of enemies to prevent performance degradation
+    const MAX_ENEMIES = 20;
+    const toSpawn = Math.min(count, MAX_ENEMIES - enemies.length);
+    
+    if (toSpawn <= 0) return;
+
+    for (let i = 0; i < toSpawn; i++) {
         for (let attempt = 0; attempt < 50; attempt++) {
             const angle = Math.random() * Math.PI * 2;
-            const dist = 50 + Math.random() * 100; // 50-150 units away
+            const dist = 100 + Math.random() * 100; // 100-200 units away
             
             const x = tank.mesh.position.x + Math.cos(angle) * dist;
             const z = tank.mesh.position.z + Math.sin(angle) * dist;
@@ -2692,6 +2716,56 @@ function animate() {
         toPlayer.y = 0;
         const dist = toPlayer.length();
         
+        // Respawn if too far
+        const RESPAWN_DISTANCE = 350;
+        if (dist > RESPAWN_DISTANCE) {
+             const tankForward = new THREE.Vector3(0, 0, -1).applyQuaternion(tank.mesh.quaternion);
+             // Note: atan2(x, z) corresponds to standard 3D rotation if Y is up
+             const baseAngle = Math.atan2(tankForward.x, tankForward.z);
+             
+             // Try to find a valid spawn spot in front of the player
+             for (let attempt = 0; attempt < 10; attempt++) {
+                 // +/- 90 degrees (PI) - Wider arc for more randomness
+                 const angle = baseAngle + (Math.random() - 0.5) * Math.PI; 
+                 const spawnDist = 120 + Math.random() * 80; // 120-200 units away
+                 
+                 // In 3D (Y-up), x is sin, z is cos? No, standard trig is x=cos, y=sin.
+                 // But here we are in XZ plane. 
+                 // If angle 0 is +Z (South), then x=sin, z=cos.
+                 // If angle 0 is +X (East), then x=cos, z=sin.
+                 // THREE.js standard: 0 is usually +X? 
+                 // Let's stick to sin/cos matching the atan2 inputs.
+                 // atan2(x, z) -> x is "y" (numerator), z is "x" (denominator).
+                 // So x = sin(angle), z = cos(angle).
+                 
+                 const x = tank.mesh.position.x + Math.sin(angle) * spawnDist;
+                 const z = tank.mesh.position.z + Math.cos(angle) * spawnDist;
+                 
+                 const h = getTerrainHeight(x, z);
+                 
+                 if (Math.abs(h) < 0.1) {
+                     const gx = Math.round(x / VOXEL_SIZE);
+                     const gz = Math.round(z / VOXEL_SIZE);
+                     
+                     let clear = true;
+                     for(let dx = -1; dx <= 1; dx++) {
+                        for(let dz = -1; dz <= 1; dz++) {
+                            const key = `${gx+dx},${gz+dz}`;
+                            if (heightMap[key] !== 0) { clear = false; break; }
+                        }
+                        if(!clear) break;
+                     }
+                     
+                     if (clear) {
+                         enemy.mesh.position.set(gx * VOXEL_SIZE, 100, gz * VOXEL_SIZE);
+                         enemy.alertedUntil = 0;
+                         enemy.landedTime = null;
+                         return; // Done for this enemy
+                     }
+                 }
+             }
+        }
+
         let moveAmount = 0;
         let rotationAmount = 0;
 
@@ -2776,7 +2850,11 @@ function animate() {
             
             // Move if roughly facing Path
             if (canSee && Math.abs(diffToPath) < 0.5) {
-                moveAmount = ENEMY_SPEED * delta;
+                // Dynamic Speed: Increase by 0.1 per kill, cap at 80% of player speed
+                const maxEnemySpeed = TANK_SPEED * 0.8;
+                const currentSpeed = Math.min(maxEnemySpeed, ENEMY_SPEED + (killCount * 0.1));
+                moveAmount = currentSpeed * delta;
+                
                 const direction = new THREE.Vector3(0, 0, -1);
                 direction.applyQuaternion(enemy.mesh.quaternion);
                 
@@ -2822,6 +2900,23 @@ function animate() {
             // Freefall
             enemy.mesh.position.y -= 40 * delta;
             
+            // Update Opacity during fall
+            if (enemy.materials) {
+                const distToGround = Math.max(0, enemy.mesh.position.y - h);
+                // Start fading in from 30 units up (very close to ground)
+                const fadeHeight = 30; 
+                
+                let op = 0;
+                if (distToGround < fadeHeight) {
+                    // Linear fade 0 -> 1
+                    const linear = 1.0 - (distToGround / fadeHeight);
+                    // Squared for later visibility (ghost-like until impact)
+                    op = linear * linear;
+                }
+                
+                enemy.materials.forEach(m => m.opacity = op);
+            }
+
             // Landing
             if (enemy.mesh.position.y <= h + 0.5) {
                 enemy.mesh.position.y = h;
@@ -2830,6 +2925,24 @@ function animate() {
                 
                 if (!enemy.landedTime) {
                     enemy.landedTime = clock.getElapsedTime();
+                }
+
+                // Finalize opacity
+                if (enemy.materials) {
+                    enemy.materials.forEach(m => {
+                        m.opacity = 1;
+                        m.transparent = false;
+                        m.needsUpdate = true;
+                    });
+                    enemy.materials = null; // Stop updating
+                    
+                    // Enable shadows
+                    enemy.mesh.traverse(c => {
+                        if (c.isMesh) {
+                            c.castShadow = true;
+                            c.receiveShadow = true;
+                        }
+                    });
                 }
             }
         } else if (h > -50) {
@@ -2886,7 +2999,10 @@ function animate() {
         // Enemies stop at dist < 6. If further, assume they are moving.
         if (dist > 10) { 
              const enemyForward = new THREE.Vector3(0, 0, -1).applyQuaternion(enemy.mesh.quaternion);
-             predictedPos.addScaledVector(enemyForward, ENEMY_SPEED * timeToHit);
+             // Dynamic Speed for prediction
+             const maxEnemySpeed = TANK_SPEED * 0.8;
+             const currentSpeed = Math.min(maxEnemySpeed, ENEMY_SPEED + (killCount * 0.1));
+             predictedPos.addScaledVector(enemyForward, currentSpeed * timeToHit);
         }
 
         const toTarget = predictedPos.sub(tank.mesh.position);
