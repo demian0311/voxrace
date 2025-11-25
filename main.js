@@ -703,6 +703,8 @@ function createEnemyTank(pos) {
     const barrel = new THREE.Mesh(barrelGeo, barrelMat);
     barrel.rotation.x = Math.PI / 2;
     barrel.position.set(0, 0, -2.5);
+    // Disable raycasting on barrel to force center-mass aiming
+    barrel.raycast = () => {};
     turret.add(barrel);
 
     // Tracks
@@ -766,9 +768,11 @@ function createEnemyTank(pos) {
     if (pos.y > 10) {
         materials.forEach(m => {
             m.transparent = true;
-            m.opacity = 0;
+            m.opacity = 0.0; // Start invisible
+            m.depthWrite = false; 
+            m.needsUpdate = true;
         });
-        // Disable shadows initially so we don't see a shadow for an invisible tank
+        // Disable shadows initially
         tankGroup.traverse(c => {
             if (c.isMesh) {
                 c.castShadow = false;
@@ -791,7 +795,10 @@ function createEnemyTank(pos) {
         hasBlindSpot: Math.random() < 0.9, // 90% chance to have a blind spot
         alertedUntil: 0,
         landedTime: null, // Track when they hit the ground
-        attackDelay: Math.random() * 3.0 // Random delay 0-3s before first attack
+        attackDelay: Math.random() * 3.0, // Random delay 0-3s before first attack
+        health: 1,
+        maxHealth: 1,
+        damageFlashTime: 0
     });
 }
 
@@ -1107,35 +1114,6 @@ function generateChunk(cx, cz) {
     glassMesh.instanceMatrix.needsUpdate = true;
     worldGroup.add(glassMesh);
     
-    // Spawn Enemy (10% chance per chunk, but not at 0,0)
-    if ((cx !== 0 || cz !== 0) && rng() > 0.9) {
-        const rx = Math.floor(rng() * CHUNK_SIZE);
-        const rz = Math.floor(rng() * CHUNK_SIZE);
-        const gx = startX + rx;
-        const gz = startZ + rz;
-        
-        // Ensure we spawn on flat ground (height 0) and have clearance
-        // Check 3x3 area (tank is large and rotates)
-        let clear = true;
-        for(let dx = -1; dx <= 1; dx++) {
-            for(let dz = -1; dz <= 1; dz++) {
-                const key = `${gx+dx},${gz+dz}`;
-                const h = heightMap[key];
-                // Must be explicitly 0 (ground level). Undefined means unknown/not generated -> unsafe.
-                if (h !== 0) {
-                    clear = false;
-                    break;
-                }
-            }
-            if(!clear) break;
-        }
-
-        if (clear) {
-            const pos = new THREE.Vector3(gx * VOXEL_SIZE, 0, gz * VOXEL_SIZE);
-            createEnemyTank(pos);
-        }
-    }
-
     return { meshes: [mesh, carMesh, wheelMesh, glassMesh], keys: chunkKeys };
 }
 
@@ -1671,7 +1649,7 @@ function createTank() {
 
 const tank = createTank();
 scene.add(tank.mesh);
-tank.mesh.position.set(25, 0, 25); // Start at center of chunk (0,0), which is a road intersection
+tank.mesh.position.set(25, 100, 25); // Start high up for drop in
 
 let recoilVelocity = new THREE.Vector3();
 
@@ -1909,7 +1887,9 @@ function enemyShoot(enemy) {
     // Wait random time (0-3s) after landing before shooting
     if (!enemy.landedTime || now - enemy.landedTime < (enemy.attackDelay || 3.0)) return;
 
-    if (now - enemy.lastFireTime < ENEMY_FIRE_COOLDOWN) return;
+    // Dynamic Fire Rate: Reduce cooldown by 0.1s per kill, cap at 1.0s
+    const currentCooldown = Math.max(1.0, ENEMY_FIRE_COOLDOWN - (killCount * 0.1));
+    if (now - enemy.lastFireTime < currentCooldown) return;
     
     enemy.lastFireTime = now;
 
@@ -2839,13 +2819,15 @@ function animate() {
                 enemy.mesh.rotateY(rotationAmount);
             }
 
-            // Flash if aiming at player
-            if (canSee && Math.abs(diffToPlayer) < 0.3) {
-                const flash = (Math.sin(now * 20) + 1) / 2;
-                enemy.turretMat.emissive.setHex(0xD08770); // Nord12
-                enemy.turretMat.emissiveIntensity = flash * 0.5;
-            } else {
-                enemy.turretMat.emissiveIntensity = 0;
+            // Flash if aiming at player (only if not taking damage)
+            if (enemy.damageFlashTime <= 0) {
+                if (canSee && Math.abs(diffToPlayer) < 0.3) {
+                    const flash = (Math.sin(now * 20) + 1) / 2;
+                    enemy.turretMat.emissive.setHex(0xD08770); // Nord12
+                    enemy.turretMat.emissiveIntensity = flash * 0.5;
+                } else {
+                    enemy.turretMat.emissiveIntensity = 0;
+                }
             }
             
             // Move if roughly facing Path
@@ -2896,25 +2878,56 @@ function animate() {
         // Gravity
         const h = getTerrainHeight(enemy.mesh.position.x, enemy.mesh.position.z);
         
+        // Check if falling (significantly above ground)
         if (enemy.mesh.position.y > h + 0.5) {
             // Freefall
             enemy.mesh.position.y -= 40 * delta;
             
+            // Ensure materials array exists for ANY falling tank
+            // This catches tanks that might have been spawned without the materials array
+            // or if the array was cleared but they are falling again (e.g. drove off a cliff)
+            if (!enemy.materials) {
+                enemy.materials = [];
+                enemy.mesh.traverse(c => {
+                    if (c.isMesh && c.material) {
+                        if (Array.isArray(c.material)) {
+                            enemy.materials.push(...c.material);
+                        } else {
+                            enemy.materials.push(c.material);
+                        }
+                    }
+                });
+            }
+
             // Update Opacity during fall
             if (enemy.materials) {
                 const distToGround = Math.max(0, enemy.mesh.position.y - h);
-                // Start fading in from 30 units up (very close to ground)
-                const fadeHeight = 30; 
+                const fadeHeight = 100; 
                 
                 let op = 0;
                 if (distToGround < fadeHeight) {
-                    // Linear fade 0 -> 1
+                    // Linear fade 0 -> 1.0
                     const linear = 1.0 - (distToGround / fadeHeight);
-                    // Squared for later visibility (ghost-like until impact)
-                    op = linear * linear;
+                    op = linear;
                 }
                 
-                enemy.materials.forEach(m => m.opacity = op);
+                enemy.materials.forEach(m => {
+                    m.opacity = op;
+                    // Ensure transparency is active
+                    if (!m.transparent) {
+                        m.transparent = true;
+                        m.depthWrite = false;
+                        m.needsUpdate = true;
+                    }
+                });
+                
+                // Disable shadows while falling
+                enemy.mesh.traverse(c => {
+                    if (c.isMesh && c.castShadow) {
+                        c.castShadow = false;
+                        c.receiveShadow = false;
+                    }
+                });
             }
 
             // Landing
@@ -2932,6 +2945,7 @@ function animate() {
                     enemy.materials.forEach(m => {
                         m.opacity = 1;
                         m.transparent = false;
+                        m.depthWrite = true; // Restore depth write
                         m.needsUpdate = true;
                     });
                     enemy.materials = null; // Stop updating
@@ -3378,17 +3392,32 @@ function animate() {
     }
 
     // Camera Follow
-    // Position camera behind and above tank
-    const relativeCameraOffset = new THREE.Vector3(0, 10, 15);
-    const cameraOffset = relativeCameraOffset.applyMatrix4(tank.mesh.matrixWorld);
+    let targetCamPos, targetLookAt;
+
+    if (tank.mesh.position.y > 5) {
+        // Drop Mode: Top-down view
+        // Camera high above, slightly behind to see landing zone
+        targetCamPos = tank.mesh.position.clone().add(new THREE.Vector3(0, 60, 20));
+        targetLookAt = tank.mesh.position.clone();
+    } else {
+        // Drive Mode: Behind and above
+        const relativeCameraOffset = new THREE.Vector3(0, 10, 15);
+        targetCamPos = relativeCameraOffset.applyMatrix4(tank.mesh.matrixWorld);
+        
+        // Look ahead
+        const camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(tank.mesh.quaternion);
+        targetLookAt = tank.mesh.position.clone().add(camForward.multiplyScalar(20));
+    }
     
     // Smooth camera movement
-    camera.position.lerp(cameraOffset, 0.1);
+    camera.position.lerp(targetCamPos, 0.1);
     
-    // Look ahead of the tank so the tank is lower on screen
-    const camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(tank.mesh.quaternion);
-    const lookTarget = tank.mesh.position.clone().add(camForward.multiplyScalar(20));
-    camera.lookAt(lookTarget);
+    // Smooth lookAt is harder with standard LookAt, but we can lerp the quaternion or just look at the target.
+    // For simplicity, let's just lookAt. The position lerp provides most of the smoothness.
+    // To avoid snapping lookAt, we can lerp the lookAt target too?
+    if (!camera.userData.currentLookAt) camera.userData.currentLookAt = targetLookAt.clone();
+    camera.userData.currentLookAt.lerp(targetLookAt, 0.1);
+    camera.lookAt(camera.userData.currentLookAt);
 
     // Target Acquisition
     const startPos = new THREE.Vector3(0, 0, -5);
@@ -3448,6 +3477,6 @@ window.addEventListener('resize', () => {
 });
 
 updateChunks();
-spawnReinforcements(10);
+spawnReinforcements(5);
 
 animate();
