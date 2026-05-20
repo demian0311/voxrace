@@ -2,6 +2,8 @@
 
 A simple 3D voxel world where you can drive a tank, built with Three.js.
 
+Try it now at https://demian0311.github.io/voxrace/
+
 ## How to Run
 
 Since this project uses ES modules, you need to serve it with a local web server.
